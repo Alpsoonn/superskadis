@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="A visual configurator for printable SKÅDIS parts." />
+    <title>superskadis creator</title>
+    <link rel="stylesheet" href="./styles.css?v=19" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="./" aria-label="superskadis creator home">superskadis creator</a>
+      <div class="header-actions">
+        <span class="build-count" id="build-count">0 parts on board</span>
+        <button class="button button-primary" id="open-build-plates" type="button">Build plates</button>
+        <button class="button button-quiet" id="clear-board" type="button">Clear board</button>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <aside class="catalog-panel" aria-label="Parts catalog">
+        <div class="panel-heading">
+          <p class="eyebrow">Parts library</p>
+          <h1>Build your setup.</h1>
+          <p>Pick its position. Drag it onto your board.</p>
+        </div>
+        <label class="search-field">
+          <span class="sr-only">Search parts</span>
+          <input id="part-search" type="search" placeholder="Search parts" autocomplete="off" />
+          <span aria-hidden="true">⌕</span>
+        </label>
+        <div class="filter-row" id="filters" aria-label="Filter parts"></div>
+        <label class="bom-option">
+          <input id="skip-unnecessary-hardware" type="checkbox" checked />
+          <span class="bom-option-check" aria-hidden="true"></span>
+          <span class="bom-option-copy">
+            <strong>Skip unnecessary hardware</strong>
+            <small>Do not install rings used by only one panel.</small>
+          </span>
+        </label>
+        <div class="parts-list" id="parts-list" aria-live="polite"></div>
+      </aside>
+
+      <section class="workspace" aria-label="3D board workspace">
+        <div class="workspace-tools" role="toolbar" aria-label="Board tools">
+          <button class="tool-button" id="measure-tool" type="button" aria-label="Measure" aria-pressed="false" title="Measure (M)">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 15.5 15.5 4 20 8.5 8.5 20 4 15.5Z" />
+              <path d="m12.7 6.8 2 2M9.9 9.6l2 2M7.1 12.4l2 2" />
+            </svg>
+          </button>
+          <span class="tool-separator" aria-hidden="true"></span>
+          <button class="tool-button" id="undo-measurement" type="button" aria-label="Remove last measurement" title="Remove last measurement" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7 4 12l5 5M5 12h8a6 6 0 0 1 6 6" /></svg>
+          </button>
+          <button class="tool-button" id="clear-measurements" type="button" aria-label="Clear all measurements" title="Clear all measurements" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M9 7V4h6v3M8 10v8M12 10v8M16 10v8M7 7l1 14h8l1-14" /></svg>
+          </button>
+          <span class="measure-status" id="measure-status" aria-live="polite">Measure</span>
+        </div>
+        <div class="canvas-wrap" id="drop-zone">
+          <canvas id="scene" aria-label="Interactive 3D view of your SKÅDIS board"></canvas>
+          <div class="measurement-layer" id="measurement-layer" aria-hidden="true"></div>
+        </div>
+      </section>
+
+      <aside class="bom-panel" aria-label="Bill of materials">
+        <div class="bom-heading">
+          <p class="eyebrow">Build summary</p>
+          <h2>Bill of materials</h2>
+          <p>Live quantities for every panel and connection in the current layout.</p>
+        </div>
+        <div class="bom-content">
+          <section class="bom-section" aria-labelledby="bom-panels-title">
+            <div class="bom-section-heading">
+              <h3 id="bom-panels-title">Panels</h3>
+              <span id="bom-panel-count">0</span>
+            </div>
+            <div class="bom-list" id="bom-panels-list">
+              <p class="bom-empty">No panels added.</p>
+            </div>
+          </section>
+          <section class="bom-section" aria-labelledby="bom-connections-title">
+            <div class="bom-section-heading">
+              <h3 id="bom-connections-title">Connections</h3>
+              <span id="bom-connection-count">0</span>
+            </div>
+            <div class="bom-list" id="bom-connections-list">
+              <p class="bom-empty">No connections required.</p>
+            </div>
+          </section>
+        </div>
+        <div class="bom-total">
+          <span>Total pieces</span>
+          <strong id="bom-total-count">0</strong>
+        </div>
+      </aside>
+
+    </main>
+
+    <template id="part-template">
+      <article class="part-card" draggable="true">
+        <div class="part-preview"><span></span></div>
+      </article>
+    </template>
+    <dialog class="plate-dialog" id="plate-dialog" aria-labelledby="plate-dialog-title">
+      <div class="plate-dialog-shell">
+        <header class="plate-dialog-header">
+          <div>
+            <p class="eyebrow">Print preparation</p>
+            <h2 id="plate-dialog-title">Build plate generator</h2>
+            <p>Pack the current bill of materials into the fewest printable STL plates.</p>
+          </div>
+          <button class="dialog-close" id="close-build-plates" type="button" aria-label="Close">×</button>
+        </header>
+        <section class="plate-settings" aria-label="Build plate settings">
+          <label>Bed X <span><input id="plate-width" type="number" min="201" step="1" value="256" /> mm</span></label>
+          <label>Bed Y <span><input id="plate-depth" type="number" min="201" step="1" value="256" /> mm</span></label>
+          <label>Part gap <span><input id="plate-spacing" type="number" min="0" max="50" step="0.5" value="3" /> mm</span></label>
+          <label>Reserved brim <span><input id="plate-brim" type="number" min="0" max="50" step="0.5" value="3" /> mm</span></label>
+          <div class="plate-settings-actions">
+            <button class="button button-primary" id="generate-plates" type="button">Generate</button>
+            <button class="button" id="optimize-plates" type="button">Optimize more</button>
+          </div>
+        </section>
+        <div class="plate-progress" id="plate-progress" hidden>
+          <div><span id="plate-progress-label">Preparing models…</span><strong id="plate-progress-value">0%</strong></div>
+          <progress id="plate-progress-bar" max="100" value="0"></progress>
+        </div>
+        <div class="plate-notice" id="plate-notice">Add parts to the board, then generate build plates.</div>
+        <section class="plate-results" id="plate-results" aria-live="polite"></section>
+        <footer class="plate-dialog-footer" id="plate-export-actions" hidden>
+          <div><strong id="plate-summary"></strong><small>Coordinates are centered at X0 Y0. Brim is reserved, not exported.</small></div>
+          <button class="button" id="download-plates" type="button">Download STL files</button>
+          <button class="button button-primary" id="save-plates-folder" type="button">Save to folder</button>
+        </footer>
+      </div>
+    </dialog>
+    <dialog class="plate-editor-dialog" id="plate-editor-dialog" aria-labelledby="plate-editor-title">
+      <div class="plate-editor-shell">
+        <header class="plate-dialog-header">
+          <div>
+            <p class="eyebrow">Manual layout</p>
+            <h2 id="plate-editor-title">Edit build plate</h2>
+            <p>Drag parts freely, enter any rotation angle, or lock parts before repacking.</p>
+          </div>
+          <button class="dialog-close" id="close-plate-editor" type="button" aria-label="Close">×</button>
+        </header>
+        <div class="plate-editor-body">
+          <canvas id="plate-editor-canvas" width="900" height="620" aria-label="Editable build plate"></canvas>
+          <aside class="plate-editor-controls">
+            <p class="plate-editor-help">Select a model on the plate. Invalid placements are red but can still be exported.</p>
+            <div id="plate-selection-empty" class="plate-selection-empty">No model selected.</div>
+            <div id="plate-selection-controls" hidden>
+              <strong id="plate-selection-name"></strong>
+              <label>Rotation <span><input id="plate-selection-angle" type="number" step="1" value="0" />°</span></label>
+              <label class="plate-lock"><input id="plate-selection-lock" type="checkbox" /> Lock position</label>
+            </div>
+            <button class="button" id="repack-plate" type="button">Repack unlocked</button>
+            <p class="plate-editor-status" id="plate-editor-status"></p>
+          </aside>
+        </div>
+      </div>
+    </dialog>
+    <script src="./catalog.js?v=12"></script>
+    <script type="module" src="./app.js?v=39"></script>
+  </body>
+</html>
