@@ -133,6 +133,7 @@
   }
 
   function renderCatalog() {
+    window.SKADIS_CORNER_STYLE = state.corners;
     const categories = ['All', 'Panels', 'Connections'];
     filters.replaceChildren(...categories.map(category => {
       const button = document.createElement('button');

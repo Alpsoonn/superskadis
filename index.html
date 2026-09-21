@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="A visual configurator for printable SKÅDIS parts." />
     <title>superskadis creator</title>
-    <link rel="stylesheet" href="./styles.css?v=19" />
+    <link rel="stylesheet" href="./styles.css?v=22" />
     <script type="importmap">
       {
         "imports": {
@@ -19,6 +19,7 @@
     <header class="site-header">
       <a class="brand" href="./" aria-label="superskadis creator home">superskadis creator</a>
       <div class="header-actions">
+        <a class="makerworld-link" href="https://makerworld.com/en/@Alpson" target="_blank" rel="noopener noreferrer">@Alpson on MakerWorld</a>
         <span class="build-count" id="build-count">0 parts on board</span>
         <button class="button button-primary" id="open-build-plates" type="button">Build plates</button>
         <button class="button button-quiet" id="clear-board" type="button">Clear board</button>
@@ -136,7 +137,7 @@
           <progress id="plate-progress-bar" max="100" value="0"></progress>
         </div>
         <div class="plate-notice" id="plate-notice">Add parts to the board, then generate build plates.</div>
-        <section class="plate-results" id="plate-results" aria-live="polite"></section>
+        <section class="plate-results" id="plate-results" aria-label="Generated build plates" aria-live="polite" tabindex="0"></section>
         <footer class="plate-dialog-footer" id="plate-export-actions" hidden>
           <div><strong id="plate-summary"></strong><small>Coordinates are centered at X0 Y0. Brim is reserved, not exported.</small></div>
           <button class="button" id="download-plates" type="button">Download STL files</button>
@@ -170,7 +171,7 @@
         </div>
       </div>
     </dialog>
-    <script src="./catalog.js?v=12"></script>
-    <script type="module" src="./app.js?v=39"></script>
+    <script src="./catalog.js?v=13"></script>
+    <script type="module" src="./app.js?v=43"></script>
   </body>
 </html>

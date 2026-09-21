@@ -169,6 +169,101 @@ function resize(){ const r=dropZone.getBoundingClientRect(); const height=5.8; c
 function animate(){ requestAnimationFrame(animate); controls.update(); updateMeasurementLabels(); renderer.render(scene,camera); } animate();
 function prepareGeometry(geometry,part) { geometry.scale(STL_UNIT_SCALE,STL_UNIT_SCALE,STL_UNIT_SCALE); geometry.computeBoundingBox(); const center=new THREE.Vector3(); geometry.boundingBox.getCenter(center); const configuredOrigin=MODEL_ORIGINS_MM[part.file]; if(configuredOrigin){ geometry.translate(-configuredOrigin[0]*STL_UNIT_SCALE,-configuredOrigin[1]*STL_UNIT_SCALE,-center.z); geometry.userData.logicalOrigin=new THREE.Vector2(configuredOrigin[0],configuredOrigin[1]); } else { geometry.translate(-center.x,-center.y,-center.z); } geometry.computeBoundingBox(); return geometry; }
 async function getGeometry(part) { if(state.models.has(part.file)) return state.models.get(part.file); const geometry=await loader.loadAsync(part.url); const model=prepareGeometry(geometry,part); state.models.set(part.file,model); return model; }
+// Quick-build palette: the centre fills a cell, the four wedges add quarters,
+// and the four outer vertices add half panels. It never receives pointer events.
+const quickBuildGroup=new THREE.Group(); scene.add(quickBuildGroup);
+const quickBuildLines=[];
+const quickRadius=GRID_VERTEX_RADIUS_MM*STL_UNIT_SCALE;
+const quickInnerRadius=quickRadius*.26;
+const quickOuter=[[0,quickRadius],[quickRadius,0],[0,-quickRadius],[-quickRadius,0]];
+const quickInner=[[0,quickInnerRadius],[quickInnerRadius,0],[0,-quickInnerRadius],[-quickInnerRadius,0]];
+function quickLine(a,b){quickBuildLines.push(a[0],a[1],.69,b[0],b[1],.69);}
+for(let index=0;index<4;index++){
+  quickLine(quickOuter[index],quickOuter[(index+1)%4]);
+  quickLine(quickInner[index],quickInner[(index+1)%4]);
+  quickLine(quickInner[index],quickOuter[index]);
+}
+const quickLineGeometry=new THREE.BufferGeometry(); quickLineGeometry.setAttribute('position',new THREE.Float32BufferAttribute(quickBuildLines,3));
+const quickOutline=new THREE.LineSegments(quickLineGeometry,new THREE.LineBasicMaterial({color:0xe1e9e5,transparent:true,opacity:.5,depthTest:false,depthWrite:false}));
+quickOutline.frustumCulled=false; quickOutline.renderOrder=6; quickBuildGroup.add(quickOutline);
+for(const [x,y] of quickOuter){ const marker=new THREE.Mesh(new THREE.RingGeometry(.045,.065,24),new THREE.MeshBasicMaterial({color:0xe1e9e5,transparent:true,opacity:.55,depthTest:false,depthWrite:false,side:THREE.DoubleSide})); marker.position.set(x,y,.7); marker.renderOrder=7; quickBuildGroup.add(marker); }
+for(const [x,y] of quickInner){ const marker=new THREE.Mesh(new THREE.CircleGeometry(.035,20),new THREE.MeshBasicMaterial({color:0xe1e9e5,transparent:true,opacity:.55,depthTest:false,depthWrite:false,side:THREE.DoubleSide})); marker.position.set(x,y,.7); marker.renderOrder=7; quickBuildGroup.add(marker); }
+quickBuildGroup.visible=false;
+let quickBuildCell=null; let quickBuildGhost=null; let quickBuildGhostKey=null; let quickBuildToken=0; let quickPress=null;
+function quickBuildOptions(){
+  const rounded=window.SKADIS_CORNER_STYLE==='Rounded'?' rounded':'';
+  return [
+    ['full','main square.stl',0],
+    ['corner-ne',`90 horizontal${rounded}.stl`,0],
+    ['corner-nw',`90 vertical${rounded}.stl`,Math.PI],
+    ['corner-sw',`90 horizontal${rounded}.stl`,Math.PI],
+    ['corner-se',`90 vertical${rounded}.stl`,0],
+    ['half-n','180 horizontal.stl',0],
+    ['half-e','180 vertical.stl',0],
+    ['half-s','180 horizontal.stl',Math.PI],
+    ['half-w','180 vertical.stl',Math.PI]
+  ];
+}
+function quickChoiceAt(point,center){
+  const x=point.x-center.x, y=point.y-center.y;
+  if(Math.abs(x)+Math.abs(y)>quickRadius+.015)return null;
+  const vertices=[['half-n',0,quickRadius],['half-e',quickRadius,0],['half-s',0,-quickRadius],['half-w',-quickRadius,0]];
+  const vertex=vertices.find(([,vx,vy])=>Math.hypot(x-vx,y-vy)<quickRadius*.23||Math.hypot(x-vx*.26,y-vy*.26)<quickRadius*.11);
+  if(vertex)return vertex[0];
+  if(Math.abs(x)+Math.abs(y)<quickInnerRadius)return 'full';
+  return `corner-${y>=0?'n':'s'}${x>=0?'e':'w'}`;
+}
+function isQuickChoiceValid(choice,center){
+  const candidate={userData:{part:choice.part},position:center,rotation:{z:choice.rotation}};
+  if(hasPanelCollision(candidate))return false;
+  const polygon=transformPanelPolygon(candidate);
+  return placed.children.some(panel=>PANEL_POLYGONS_MM[panel.userData.part.file]&&polygonsShareEdge(polygon,transformPanelPolygon(panel)));
+}
+function removeQuickGhost(){ quickBuildToken++; if(quickBuildGhost){scene.remove(quickBuildGhost);quickBuildGhost.material.dispose();quickBuildGhost=null;} quickBuildGhostKey=null; }
+function hideQuickBuild(){quickBuildGroup.visible=false;quickBuildCell=null;removeQuickGhost();canvas.style.cursor='';}
+function setQuickGhost(choice,center){
+  const key=choice?`${center.x.toFixed(4)}:${center.y.toFixed(4)}:${choice.part.file}:${choice.rotation}`:null;
+  if(key===quickBuildGhostKey)return;
+  removeQuickGhost();
+  if(!choice)return;
+  quickBuildGhostKey=key;
+  const token=quickBuildToken;
+  getGeometry(choice.part).then(geometry=>{
+    if(token!==quickBuildToken||!quickBuildCell)return;
+    const material=new THREE.MeshStandardMaterial({color:0xc7ceca,roughness:.85,transparent:true,opacity:.3,depthTest:false,depthWrite:false});
+    const ghost=new THREE.Mesh(geometry,material);
+    ghost.position.set(center.x,center.y,.56);
+    ghost.rotation.z=choice.rotation;
+    ghost.renderOrder=5;
+    scene.add(ghost);
+    quickBuildGhost=ghost;
+  }).catch(()=>{});
+}
+function updateQuickBuild(event){
+  if(state.measureMode||menuDrag||placed.children.every(mesh=>!PANEL_POLYGONS_MM[mesh.userData.part.file])){hideQuickBuild();return null;}
+  const point=screenToBoard(event);
+  const cursor=new THREE.Vector2(point.x,point.y);
+  if(placed.children.some(mesh=>{const polygon=transformPanelPolygon(mesh);return polygon&&pointInsidePolygon(cursor,polygon);})){hideQuickBuild();return null;}
+  const center=quickBuildCell&&Math.abs(point.x-quickBuildCell.center.x)+Math.abs(point.y-quickBuildCell.center.y)<=quickRadius+.015
+    ?quickBuildCell.center
+    :snapToGridCellCenter({category:'Structure'},point);
+  const options=new Map();
+  for(const [id,file,rotation] of quickBuildOptions()){
+    const part=parts.find(item=>item.file===file);
+    if(!part)continue;
+    const choice={id,part:{...part,initialRotation:rotation},rotation};
+    if(isQuickChoiceValid(choice,center))options.set(id,choice);
+  }
+  if(!options.size){hideQuickBuild();return null;}
+  quickBuildCell={center,options};
+  quickBuildGroup.position.set(center.x,center.y,0);
+  quickBuildGroup.visible=true;
+  const id=quickChoiceAt(point,center);
+  const choice=options.get(id)||null;
+  setQuickGhost(choice,center);
+  canvas.style.cursor=choice?'pointer':'';
+  return choice;
+}
 const autoConnectors=new THREE.Group(); scene.add(autoConnectors); const autoConnectorMaterial=new THREE.MeshStandardMaterial({color:0xc8ef45,roughness:.42,metalness:.12,transparent:true,opacity:.5,depthWrite:false}); let connectorRevision=0;
 function getWorldConnectionPorts(mesh){ const edges=CONNECTION_PORTS[mesh.userData.part.file]||[]; const cos=Math.cos(mesh.rotation.z); const sin=Math.sin(mesh.rotation.z); const ports=[]; edges.forEach(edge=>{ const normalLength=Math.hypot(edge.normal[0],edge.normal[1]); const localNormalX=edge.normal[0]/normalLength; const localNormalY=edge.normal[1]/normalLength; const normal=new THREE.Vector2(localNormalX*cos-localNormalY*sin,localNormalX*sin+localNormalY*cos); edge.points.forEach(([xMm,yMm],index)=>{ const x=xMm*STL_UNIT_SCALE; const y=yMm*STL_UNIT_SCALE; ports.push({ key:`${mesh.uuid}:${edge.id}:${index}`, mesh, edge:edge.id, index, position:new THREE.Vector3(mesh.position.x+x*cos-y*sin,mesh.position.y+x*sin+y*cos,mesh.position.z), normal }); }); }); return ports; }
 async function recomputeAutoConnectors(){
@@ -228,6 +323,25 @@ function polygonsOverlap(first,second){
   return true;
 }
 function hasPanelCollision(mesh){ const polygon=transformPanelPolygon(mesh); if(!polygon)return false; return placed.children.some(other=>other!==mesh&&Boolean(PANEL_POLYGONS_MM[other.userData.part.file])&&polygonsOverlap(polygon,transformPanelPolygon(other))); }
+function polygonsShareEdge(first,second){
+  for(let i=0;i<first.length;i++){
+    const a=first[i], b=first[(i+1)%first.length];
+    const edge=b.clone().sub(a);
+    const length=edge.length();
+    if(length<.001)continue;
+    const direction=edge.divideScalar(length);
+    for(let j=0;j<second.length;j++){
+      const c=second[j], d=second[(j+1)%second.length];
+      const other=d.clone().sub(c).normalize();
+      if(Math.abs(direction.cross(other))>.01)continue;
+      if(Math.abs(c.clone().sub(a).cross(direction))>.045||Math.abs(d.clone().sub(a).cross(direction))>.045)continue;
+      const cAlong=c.clone().sub(a).dot(direction);
+      const dAlong=d.clone().sub(a).dot(direction);
+      if(Math.min(length,Math.max(cAlong,dAlong))-Math.max(0,Math.min(cAlong,dAlong))>.08)return true;
+    }
+  }
+  return false;
+}
 function pointInsidePolygon(point,polygon){ let inside=false; for(let index=0,previous=polygon.length-1;index<polygon.length;previous=index++){ const currentPoint=polygon[index]; const previousPoint=polygon[previous]; const crosses=(currentPoint.y>point.y)!==(previousPoint.y>point.y); if(crosses&&point.x<(previousPoint.x-currentPoint.x)*(point.y-currentPoint.y)/(previousPoint.y-currentPoint.y)+currentPoint.x)inside=!inside; } return inside; }
 function getVertexSectorMask(vertex,polygon){ let mask=0; const sampleDistance=15*STL_UNIT_SCALE; for(let sector=0;sector<8;sector++){ const angle=(sector+.5)*Math.PI/4; const sample=new THREE.Vector2(vertex.x+Math.cos(angle)*sampleDistance,vertex.y+Math.sin(angle)*sampleDistance); if(pointInsidePolygon(sample,polygon))mask|=1<<sector; } return mask; }
 function countBits(mask){ let count=0; for(let value=mask;value;value>>=1)count+=value&1; return count; }
@@ -349,21 +463,73 @@ canvas.addEventListener('wheel',event=>{ event.preventDefault(); const pointBefo
 document.addEventListener('skadis:add-part', event => addPart(event.detail));
 let menuDrag=null; let menuDragToken=0;
 function finishMenuDrop(){ if(!menuDrag?.mesh)return; const mesh=menuDrag.mesh; if(mesh.userData.placementValid===false){scene.remove(mesh);mesh.material.dispose();menuDrag=null;return;} scene.remove(mesh); placed.add(mesh); mesh.visible=true; if(mesh.material?.color)mesh.material.color.setHex(PANEL_COLOR); select(mesh); updateCount(); menuDrag=null; recomputeAutoHardware(); }
-document.addEventListener('skadis:menu-drag-start',async event=>{ const token=++menuDragToken; if(menuDrag?.mesh){scene.remove(menuDrag.mesh);menuDrag.mesh.material.dispose();} menuDrag={token,part:event.detail.part,mesh:null,valid:false,desiredPosition:null,over:false,dropped:false}; try{ const geometry=await getGeometry(event.detail.part); if(!menuDrag||menuDrag.token!==token)return; const material=new THREE.MeshStandardMaterial({color:PANEL_COLOR,roughness:.5,metalness:.08}); const mesh=new THREE.Mesh(geometry,material); mesh.userData.part=event.detail.part; mesh.rotation.z=event.detail.part.initialRotation||0; mesh.castShadow=true; mesh.visible=menuDrag.over; if(menuDrag.desiredPosition)menuDrag.valid=placeMeshOnGrid(mesh,menuDrag.desiredPosition,true); menuDrag.mesh=mesh; scene.add(mesh); if(menuDrag.dropped)finishMenuDrop(); }catch{ if(menuDrag?.token===token)menuDrag=null; } });
+document.addEventListener('skadis:menu-drag-start',async event=>{ hideQuickBuild(); const token=++menuDragToken; if(menuDrag?.mesh){scene.remove(menuDrag.mesh);menuDrag.mesh.material.dispose();} menuDrag={token,part:event.detail.part,mesh:null,valid:false,desiredPosition:null,over:false,dropped:false}; try{ const geometry=await getGeometry(event.detail.part); if(!menuDrag||menuDrag.token!==token)return; const material=new THREE.MeshStandardMaterial({color:PANEL_COLOR,roughness:.5,metalness:.08}); const mesh=new THREE.Mesh(geometry,material); mesh.userData.part=event.detail.part; mesh.rotation.z=event.detail.part.initialRotation||0; mesh.castShadow=true; mesh.visible=menuDrag.over; if(menuDrag.desiredPosition)menuDrag.valid=placeMeshOnGrid(mesh,menuDrag.desiredPosition,true); menuDrag.mesh=mesh; scene.add(mesh); if(menuDrag.dropped)finishMenuDrop(); }catch{ if(menuDrag?.token===token)menuDrag=null; } });
 document.addEventListener('skadis:menu-drag-move',event=>{ if(!menuDrag)return; menuDrag.over=true; menuDrag.desiredPosition=screenToBoard(event.detail); if(menuDrag.mesh){menuDrag.mesh.visible=true;menuDrag.valid=placeMeshOnGrid(menuDrag.mesh,menuDrag.desiredPosition,true);} });
 document.addEventListener('skadis:menu-drag-leave',()=>{ if(menuDrag){menuDrag.over=false;if(menuDrag.mesh)menuDrag.mesh.visible=false;} });
 document.addEventListener('skadis:menu-drag-drop',event=>{ const desiredPosition=screenToBoard(event.detail); if(!menuDrag){addPart(event.detail.part,desiredPosition);return;} menuDrag.over=true;menuDrag.dropped=true;menuDrag.desiredPosition=desiredPosition;if(menuDrag.mesh){menuDrag.valid=placeMeshOnGrid(menuDrag.mesh,desiredPosition,true);finishMenuDrop();} });
 document.addEventListener('skadis:menu-drag-end',()=>{ if(!menuDrag||menuDrag.dropped)return;if(menuDrag.mesh){scene.remove(menuDrag.mesh);menuDrag.mesh.material.dispose();}menuDrag=null; });
 let draggedMesh=null; let cameraPan=null;
-canvas.addEventListener('pointerdown',e=>{ if(e.button!==0)return; const handleHit=findMeasurementHit(e,true); if(handleHit){beginMeasurementHandleDrag(e,handleHit);return;} if(state.measureMode){beginMeasurementCreation(e);return;} const rect=canvas.getBoundingClientRect(); pointer.x=((e.clientX-rect.left)/rect.width)*2-1; pointer.y=-((e.clientY-rect.top)/rect.height)*2+1; raycaster.setFromCamera(pointer,camera); const hit=raycaster.intersectObjects(placed.children)[0]; select(hit?.object); canvas.setPointerCapture(e.pointerId); if(hit){ draggedMesh=hit.object; } else { cameraPan={x:e.clientX,y:e.clientY}; } });
-canvas.addEventListener('pointermove',e=>{ if(measurementHandleDrag||creatingMeasurement){updateMeasurementPointer(e);return;} const measurementHit=findMeasurementHit(e); setHoveredMeasurement(measurementHit?.measurement||null); canvas.style.cursor=measurementHit?.handle?'grab':measurementHit?'pointer':''; if(state.measureMode){updateMeasurementPointer(e);return;} if(draggedMesh) { placeMeshOnGrid(draggedMesh,screenToBoard(e)); return; } if(cameraPan){ const rect=canvas.getBoundingClientRect(); const unitPerPixel=(camera.top-camera.bottom)/(camera.zoom*rect.height); const moveX=(e.clientX-cameraPan.x)*unitPerPixel; const moveY=(e.clientY-cameraPan.y)*unitPerPixel; camera.position.x-=moveX; camera.position.y+=moveY; controls.target.x-=moveX; controls.target.y+=moveY; cameraPan={x:e.clientX,y:e.clientY}; controls.update(); } });
-canvas.addEventListener('pointerleave',()=>{ if(!measurementHandleDrag&&!creatingMeasurement){measurementCursor.visible=false;setHoveredMeasurement(null);canvas.style.cursor='';} });
+canvas.addEventListener('pointerdown',e=>{
+  if(e.button!==0)return;
+  const handleHit=findMeasurementHit(e,true);
+  if(handleHit){hideQuickBuild();beginMeasurementHandleDrag(e,handleHit);return;}
+  if(state.measureMode){hideQuickBuild();beginMeasurementCreation(e);return;}
+  const rect=canvas.getBoundingClientRect();
+  pointer.x=((e.clientX-rect.left)/rect.width)*2-1;
+  pointer.y=-((e.clientY-rect.top)/rect.height)*2+1;
+  raycaster.setFromCamera(pointer,camera);
+  const hit=raycaster.intersectObjects(placed.children)[0];
+  select(hit?.object);
+  canvas.setPointerCapture(e.pointerId);
+  if(hit){hideQuickBuild();draggedMesh=hit.object;return;}
+  const choice=updateQuickBuild(e);
+  quickPress=choice?{id:choice.id,file:choice.part.file,rotation:choice.rotation,center:quickBuildCell.center.clone()}:null;
+  hideQuickBuild();
+  cameraPan={x:e.clientX,y:e.clientY,startX:e.clientX,startY:e.clientY,moved:false};
+});
+canvas.addEventListener('pointermove',e=>{
+  if(measurementHandleDrag||creatingMeasurement){updateMeasurementPointer(e);return;}
+  const measurementHit=findMeasurementHit(e);
+  setHoveredMeasurement(measurementHit?.measurement||null);
+  if(state.measureMode){hideQuickBuild();updateMeasurementPointer(e);return;}
+  if(draggedMesh){hideQuickBuild();placeMeshOnGrid(draggedMesh,screenToBoard(e));return;}
+  if(cameraPan){
+    if(Math.hypot(e.clientX-cameraPan.startX,e.clientY-cameraPan.startY)>5)cameraPan.moved=true;
+    if(!cameraPan.moved)return;
+    hideQuickBuild();
+    const rect=canvas.getBoundingClientRect();
+    const unitPerPixel=(camera.top-camera.bottom)/(camera.zoom*rect.height);
+    const moveX=(e.clientX-cameraPan.x)*unitPerPixel;
+    const moveY=(e.clientY-cameraPan.y)*unitPerPixel;
+    camera.position.x-=moveX;camera.position.y+=moveY;
+    controls.target.x-=moveX;controls.target.y+=moveY;
+    cameraPan.x=e.clientX;cameraPan.y=e.clientY;
+    controls.update();
+    return;
+  }
+  if(measurementHit){hideQuickBuild();canvas.style.cursor=measurementHit.handle?'grab':'pointer';return;}
+  updateQuickBuild(e);
+});
+canvas.addEventListener('pointerleave',()=>{ if(!measurementHandleDrag&&!creatingMeasurement){measurementCursor.visible=false;setHoveredMeasurement(null);if(!cameraPan)hideQuickBuild();canvas.style.cursor='';} });
 function stopMoving(e){ if(!draggedMesh&&!cameraPan)return; const modelMoved=Boolean(draggedMesh); draggedMesh=null; cameraPan=null; if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId); if(modelMoved)recomputeAutoHardware(); }
-function finishPointerInteraction(event){ if(measurementHandleDrag){updateMeasurementPointer(event);finishMeasurementHandleDrag();if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId);return;} if(creatingMeasurement){updateMeasurementPointer(event);finishMeasurementCreation();if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId);return;} stopMoving(event); }
-function cancelPointerInteraction(event){ if(measurementHandleDrag){ const measurement=measurementHandleDrag.measurement; if(measurementHandleDrag.handle==='start')measurement.start.copy(measurementHandleDrag.original); updateMeasurementVisual(measurement,measurementHandleDrag.handle==='end'?measurementHandleDrag.original:measurement.end); measurementHandleDrag=null; measurementGrid.visible=state.measureMode; hideMeasurementGuides(); canvas.style.cursor=''; } else if(creatingMeasurement)cancelMeasurementDraft(); else stopMoving(event); if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId); }
+function finishPointerInteraction(event){
+  if(measurementHandleDrag){updateMeasurementPointer(event);finishMeasurementHandleDrag();if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId);return;}
+  if(creatingMeasurement){updateMeasurementPointer(event);finishMeasurementCreation();if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId);return;}
+  if(cameraPan&&!cameraPan.moved&&quickPress){
+    quickBuildCell={center:quickPress.center};
+    const choice=updateQuickBuild(event);
+    if(choice&&choice.id===quickPress.id&&choice.part.file===quickPress.file&&choice.rotation===quickPress.rotation&&quickBuildCell.center.distanceTo(quickPress.center)<.01){
+      addPart(choice.part,quickBuildCell.center.clone().setZ(.55));
+      hideQuickBuild();
+    }
+  }
+  quickPress=null;
+  stopMoving(event);
+}
+function cancelPointerInteraction(event){ quickPress=null; hideQuickBuild(); if(measurementHandleDrag){ const measurement=measurementHandleDrag.measurement; if(measurementHandleDrag.handle==='start')measurement.start.copy(measurementHandleDrag.original); updateMeasurementVisual(measurement,measurementHandleDrag.handle==='end'?measurementHandleDrag.original:measurement.end); measurementHandleDrag=null; measurementGrid.visible=state.measureMode; hideMeasurementGuides(); canvas.style.cursor=''; } else if(creatingMeasurement)cancelMeasurementDraft(); else stopMoving(event); if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId); }
 canvas.addEventListener('pointerup',finishPointerInteraction); canvas.addEventListener('pointercancel',cancelPointerInteraction);
 canvas.addEventListener('contextmenu',event=>{ event.preventDefault(); const measurementHit=findMeasurementHit(event); if(measurementHit){ const index=measurements.indexOf(measurementHit.measurement); if(index>=0)measurements.splice(index,1); removeMeasurementVisual(measurementHit.measurement); canvas.style.cursor=''; updateMeasurementControls(); return; } if(state.measureMode){cancelMeasurementDraft();return;} const rect=canvas.getBoundingClientRect(); pointer.x=((event.clientX-rect.left)/rect.width)*2-1; pointer.y=-((event.clientY-rect.top)/rect.height)*2+1; raycaster.setFromCamera(pointer,camera); const hit=raycaster.intersectObjects(placed.children)[0]; if(!hit)return; const mesh=hit.object; if(state.selected===mesh)select(null); placed.remove(mesh); mesh.material.dispose(); updateCount(); recomputeAutoHardware(); });
-document.querySelector('#clear-board').onclick=()=>{placed.clear();autoConnectors.clear();autoRings.clear();connectorRevision++;ringRevision++;measurements.splice(0).forEach(removeMeasurementVisual);cancelMeasurementDraft();select(null);updateCount()};
+document.querySelector('#clear-board').onclick=()=>{hideQuickBuild();placed.clear();autoConnectors.clear();autoRings.clear();connectorRevision++;ringRevision++;measurements.splice(0).forEach(removeMeasurementVisual);cancelMeasurementDraft();select(null);updateCount()};
 
 // Build plate generation -----------------------------------------------------
 const plateDialog=document.querySelector('#plate-dialog');
@@ -448,10 +614,11 @@ function convexHull(points){
   return lower.concat(upper);
 }
 function footprintFromGeometry(geometry){
+  if(geometry.userData.packingHull)return geometry.userData.packingHull;
   const position=geometry.attributes.position;
   const points=[];
   for(let index=0;index<position.count;index++)points.push({x:position.getX(index)/STL_UNIT_SCALE,y:position.getY(index)/STL_UNIT_SCALE});
-  return convexHull(points);
+  return geometry.userData.packingHull=convexHull(points);
 }
 async function createPackingItems(counts,kind){
   const items=[];
@@ -473,8 +640,15 @@ function rotatedPoints(points,angle){
 function boundsForPoints(points){
   return points.reduce((bounds,point)=>({minX:Math.min(bounds.minX,point.x),maxX:Math.max(bounds.maxX,point.x),minY:Math.min(bounds.minY,point.y),maxY:Math.max(bounds.maxY,point.y)}),{minX:Infinity,maxX:-Infinity,minY:Infinity,maxY:-Infinity});
 }
+const packingRotations=new WeakMap();
+function packingRotation(item,angle){
+  let cache=packingRotations.get(item.hull);
+  if(!cache){cache=new Map();packingRotations.set(item.hull,cache);}
+  if(!cache.has(angle)){const points=rotatedPoints(item.hull,angle);cache.set(angle,{points,bounds:boundsForPoints(points)});}
+  return cache.get(angle);
+}
 function refreshPlacement(placement){
-  const local=rotatedPoints(placement.item.hull,placement.angle);
+  const local=packingRotation(placement.item,placement.angle).points;
   placement.points=local.map(point=>({x:point.x+placement.x,y:point.y+placement.y}));
   placement.bounds=boundsForPoints(placement.points);
   return placement;
@@ -513,12 +687,12 @@ function placementFits(placement,plate,options,ignore=null){
   const clearance=options.spacing+options.brim*2;
   return !plate.placements.some(other=>other!==ignore&&polygonsConflict(placement,other,clearance));
 }
-function placementCandidates(localBounds,plate,options,step){
+function* placementCandidates(localBounds,plate,options,step,scan=false){
   const minimumX=-options.width/2+options.brim-localBounds.minX;
   const maximumX=options.width/2-options.brim-localBounds.maxX;
   const minimumY=-options.depth/2+options.brim-localBounds.minY;
   const maximumY=options.depth/2-options.brim-localBounds.maxY;
-  if(minimumX>maximumX||minimumY>maximumY)return [];
+  if(minimumX>maximumX||minimumY>maximumY)return;
   const clearance=options.spacing+options.brim*2;
   const xs=new Set([minimumX,maximumX]);const ys=new Set([minimumY,maximumY]);
   plate.placements.forEach(placement=>{
@@ -528,16 +702,18 @@ function placementCandidates(localBounds,plate,options,step){
   const candidates=[];
   [...ys].filter(value=>value>=minimumY-.01&&value<=maximumY+.01).forEach(y=>[...xs].filter(value=>value>=minimumX-.01&&value<=maximumX+.01).forEach(x=>candidates.push({x,y})));
   candidates.sort((first,second)=>first.y-second.y||first.x-second.x);
-  if(candidates.length&&plate.placements.length<2)return candidates;
-  for(let y=minimumY;y<=maximumY+.01;y+=step){for(let x=minimumX;x<=maximumX+.01;x+=step)candidates.push({x,y});}
-  return candidates;
+  yield* candidates;
+  if(!scan||!plate.placements.length)return;
+  for(let y=minimumY;y<=maximumY+.01;y+=step){for(let x=minimumX;x<=maximumX+.01;x+=step)yield {x,y};}
 }
 function findPlacement(item,plate,options,step,angleOffset=0){
   let best=null;
   const angles=PACKING_ANGLES.map((_,index)=>PACKING_ANGLES[(index+angleOffset)%PACKING_ANGLES.length]);
+  // Try contact positions in every orientation before resorting to a grid scan.
+  for(const scan of [false,true]){
   for(const angle of angles){
-    const local=rotatedPoints(item.hull,angle);const localBounds=boundsForPoints(local);
-    const candidates=placementCandidates(localBounds,plate,options,step);
+    const localBounds=packingRotation(item,angle).bounds;
+    const candidates=placementCandidates(localBounds,plate,options,step,scan);
     for(const candidate of candidates){
       const placement=refreshPlacement({item,x:candidate.x,y:candidate.y,angle,locked:false});
       if(!placementFits(placement,plate,options))continue;
@@ -546,6 +722,8 @@ function findPlacement(item,plate,options,step,angleOffset=0){
       if(!best||score<best.score)best={placement,score};
       break;
     }
+  }
+  if(best)break;
   }
   return best?.placement||null;
 }
@@ -565,21 +743,75 @@ function centerPlateContents(plate){
   plate.placements.forEach(placement=>{placement.x+=offsetX;placement.y+=offsetY;refreshPlacement(placement);});
   return plate;
 }
-function packItemGroup(items,kind,options,attempt,step){
+async function packItemGroup(items,kind,options,attempt,step,onProgress=()=>{}){
+  // Hardware usually fits a single bed. A rectangular row layout proves that
+  // optimum immediately, without hundreds of polygon searches. If it fails,
+  // retain the general packer so extra plates are not created prematurely.
+  if(kind==='connections'&&items.length){
+    const fast=packHardwareRows(items,options);
+    if(fast){onProgress(1);await nextFrame();return [centerPlateContents(fast)];}
+  }
   const plates=[];
+  const availableArea=(options.width-2*options.brim)*(options.depth-2*options.brim);
+  // Hull area is the area reserved by our collision test. Only classify a part
+  // as solitary when no remaining type can share that area, regardless of rotation.
+  const smallestArea=items.reduce((minimum,item)=>Math.min(minimum,item.area),Infinity);
+  const placementsCache=new Map();
+  const layoutKey=plate=>plate.placements.map(p=>`${p.item.part.file}:${p.x}:${p.y}:${p.angle}`).join('|');
+  function cachedPlacement(item,plate){
+    const key=`${item.part.file}|${plate.layoutKey||''}`;
+    if(!placementsCache.has(key)){
+      const found=findPlacement(item,plate,options,step,attempt%8);
+      placementsCache.set(key,found?{x:found.x,y:found.y,angle:found.angle}:null);
+    }
+    const result=placementsCache.get(key);
+    return result?refreshPlacement({item,...result,locked:false}):null;
+  }
+  let processed=0;let lastYield=performance.now();
   for(const item of orderedItems(items,attempt)){
     let chosen=null;let chosenPlate=null;
-    for(const plate of plates){const candidate=findPlacement(item,plate,options,step,attempt%8);if(candidate){chosen=candidate;chosenPlate=plate;break;}}
+    const solitary=item.area+smallestArea>availableArea+1e-6;
+    for(const plate of plates){
+      if(solitary||plate.solitary||plate.usedArea+item.area>availableArea+1e-6)continue;
+      const candidate=cachedPlacement(item,plate);
+      if(candidate){chosen=candidate;chosenPlate=plate;break;}
+    }
     if(!chosen){
-      chosenPlate={kind,placements:[]};
-      chosen=findPlacement(item,chosenPlate,options,step,attempt%8);
+      chosenPlate={kind,placements:[],usedArea:0,solitary};
+      chosen=cachedPlacement(item,chosenPlate);
       if(!chosen)throw new Error(`${item.part.name} does not fit on a ${formatMillimetres(options.width)} × ${formatMillimetres(options.depth)} mm bed with the selected brim.`);
       plates.push(chosenPlate);
     }
     chosenPlate.placements.push(chosen);
+    chosenPlate.usedArea+=item.area;
+    chosenPlate.layoutKey=layoutKey(chosenPlate);
+    processed++;
+    if(performance.now()-lastYield>20){onProgress(processed/items.length);await nextFrame();lastYield=performance.now();}
   }
   plates.forEach(centerPlateContents);
   return plates;
+}
+function packHardwareRows(items,options){
+  const plate={kind:'connections',placements:[]};
+  const gap=options.spacing+2*options.brim;
+  const left=-options.width/2+options.brim,right=options.width/2-options.brim;
+  const bottom=-options.depth/2+options.brim,top=options.depth/2-options.brim;
+  const shapes=items.map(item=>{
+    const choices=PACKING_ANGLES.map(angle=>{const bounds=packingRotation(item,angle).bounds;return {angle,bounds,width:bounds.maxX-bounds.minX,height:bounds.maxY-bounds.minY};})
+      .filter(shape=>shape.width<=right-left&&shape.height<=top-bottom)
+      .sort((a,b)=>a.height-b.height||a.width-b.width);
+    return {item,shape:choices[0]};
+  });
+  if(shapes.some(entry=>!entry.shape))return null;
+  shapes.sort((a,b)=>b.shape.height-a.shape.height||b.shape.width-a.shape.width);
+  let x=left,y=bottom,rowHeight=0;
+  for(const {item,shape} of shapes){
+    if(x+shape.width>right+1e-7){x=left;y+=rowHeight+gap;rowHeight=0;}
+    if(y+shape.height>top+1e-7)return null;
+    plate.placements.push(refreshPlacement({item,x:x-shape.bounds.minX,y:y-shape.bounds.minY,angle:shape.angle,locked:false}));
+    x+=shape.width+gap;rowHeight=Math.max(rowHeight,shape.height);
+  }
+  return plate;
 }
 function packingScore(plates){
   const compactness=plates.reduce((sum,plate)=>{if(!plate.placements.length)return sum;const bounds=boundsForPoints(plate.placements.flatMap(placement=>placement.points));return sum+(bounds.maxX-bounds.minX)*(bounds.maxY-bounds.minY);},0);
@@ -614,11 +846,16 @@ async function generateBuildPlates(deep=false){
       const progress=12+(attempt/attempts)*78;
       setPlateProgress(progress,`Testing layout ${attempt+1} of ${attempts}…`);
       await nextFrame();
-      const structuralPlates=packItemGroup(structuralItems,'structural',options,attempt,step);
-      const connectionPlates=packItemGroup(connectionItems,'connections',options,attempt,step);
+      const totalItems=structuralItems.length+connectionItems.length;
+      const report=(done,label)=>setPlateProgress(progress+done/totalItems*78/attempts,`${label} · layout ${attempt+1}/${attempts}`);
+      const structuralPlates=await packItemGroup(structuralItems,'structural',options,attempt,step,fraction=>report(fraction*structuralItems.length,'Packing panels'));
+      const connectionPlates=await packItemGroup(connectionItems,'connections',options,attempt,step,fraction=>report(structuralItems.length+fraction*connectionItems.length,'Packing connections'));
       const candidate=[...structuralPlates,...connectionPlates];
       const score=packingScore(candidate);
       if(score<bestScore){best=candidate;bestScore=score;}
+      const usableArea=(options.width-2*options.brim)*(options.depth-2*options.brim);
+      const lowerBound=group=>Math.ceil(group.reduce((sum,item)=>sum+item.area,0)/usableArea-1e-9);
+      if(!deep&&candidate.length===lowerBound(structuralItems)+lowerBound(connectionItems))break;
     }
     setPlateProgress(94,'Grouping repeated plates…');await nextFrame();
     plateGeneratorState.options=options;
@@ -644,6 +881,28 @@ function plateValidity(plate,options){
   for(let first=0;first<plate.placements.length;first++)for(let second=first+1;second<plate.placements.length;second++)if(polygonsConflict(plate.placements[first],plate.placements[second],clearance)){invalid.add(plate.placements[first]);invalid.add(plate.placements[second]);}
   return invalid;
 }
+const plateModelSprites=new WeakMap();
+function plateModelSprite(geometry,color){
+  let cache=plateModelSprites.get(geometry);
+  if(!cache){cache=new Map();plateModelSprites.set(geometry,cache);}
+  if(cache.has(color))return cache.get(color);
+  const bounds=boundsForPoints(footprintFromGeometry(geometry));
+  const width=Math.max(.001,bounds.maxX-bounds.minX),height=Math.max(.001,bounds.maxY-bounds.minY);
+  const scale=512/Math.max(width,height);
+  const canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.ceil(width*scale));canvas.height=Math.max(1,Math.ceil(height*scale));
+  const context=canvas.getContext('2d');context.fillStyle=color;
+  const position=geometry.attributes.position;
+  for(let vertex=0;vertex+2<position.count;vertex+=3){
+    context.beginPath();
+    for(let offset=0;offset<3;offset++){
+      const x=(position.getX(vertex+offset)/STL_UNIT_SCALE-bounds.minX)*scale;
+      const y=(bounds.maxY-position.getY(vertex+offset)/STL_UNIT_SCALE)*scale;
+      if(!offset)context.moveTo(x,y);else context.lineTo(x,y);
+    }
+    context.closePath();context.fill();
+  }
+  const sprite={canvas,bounds,width:canvas.width/scale,height:canvas.height/scale};cache.set(color,sprite);return sprite;
+}
 function drawPlate(canvas,plate,options,selected=null,renderModelSurfaces=false){
   const rect=canvas.getBoundingClientRect();const pixelRatio=Math.min(devicePixelRatio||1,2);
   const cssWidth=Math.max(180,rect.width||500);const cssHeight=Math.max(130,rect.height||340);
@@ -662,18 +921,10 @@ function drawPlate(canvas,plate,options,selected=null,renderModelSurfaces=false)
   plate.placements.forEach(placement=>{
     const fillColor=invalid.has(placement)?'#e55252':placement===selected?'#f7b06f':plate.kind==='connections'?'#c8ef45':'#f46f47';
     if(renderModelSurfaces){
-      const position=placement.item.geometry.attributes.position;const radians=THREE.MathUtils.degToRad(placement.angle);const cos=Math.cos(radians);const sin=Math.sin(radians);
-      context.fillStyle=fillColor;context.globalAlpha=.86;
-      for(let vertex=0;vertex+2<position.count;vertex+=3){
-        context.beginPath();
-        for(let offset=0;offset<3;offset++){
-          const localX=position.getX(vertex+offset)/STL_UNIT_SCALE;const localY=position.getY(vertex+offset)/STL_UNIT_SCALE;
-          const mapped=toCanvas({x:placement.x+localX*cos-localY*sin,y:placement.y+localX*sin+localY*cos});
-          if(!offset)context.moveTo(mapped.x,mapped.y);else context.lineTo(mapped.x,mapped.y);
-        }
-        context.closePath();context.fill();
-      }
-      context.globalAlpha=1;
+      const sprite=plateModelSprite(placement.item.geometry,fillColor);
+      const origin=toCanvas(placement);
+      context.save();context.translate(origin.x,origin.y);context.rotate(-THREE.MathUtils.degToRad(placement.angle));context.globalAlpha=.86;
+      context.drawImage(sprite.canvas,sprite.bounds.minX*scale,-sprite.bounds.maxY*scale,sprite.width*scale,sprite.height*scale);context.restore();
     }else{
       const first=toCanvas(placement.points[0]);context.beginPath();context.moveTo(first.x,first.y);
       placement.points.slice(1).forEach(point=>{const mapped=toCanvas(point);context.lineTo(mapped.x,mapped.y);});context.closePath();
