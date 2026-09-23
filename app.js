@@ -4,13 +4,16 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 
 const parts = window.SKADIS_PARTS || [];
-const state = { selected: null, models: new Map(), skipUnnecessaryHardware: true, measureMode: false };
+const state = { selection: new Set(), models: new Map(), skipUnnecessaryHardware: true, avoidImpossibleConnections: true, measureMode: false };
 const count = document.querySelector('#build-count'); const dropZone = document.querySelector('#drop-zone');
 const bomPanelsList = document.querySelector('#bom-panels-list'); const bomConnectionsList = document.querySelector('#bom-connections-list');
 const bomPanelCount = document.querySelector('#bom-panel-count'); const bomConnectionCount = document.querySelector('#bom-connection-count'); const bomTotalCount = document.querySelector('#bom-total-count');
 const skipUnnecessaryHardware = document.querySelector('#skip-unnecessary-hardware');
-const measureTool = document.querySelector('#measure-tool'); const undoMeasurement = document.querySelector('#undo-measurement'); const clearMeasurements = document.querySelector('#clear-measurements');
+const avoidImpossibleConnections = document.querySelector('#avoid-impossible-connections');
+const measureTool = document.querySelector('#measure-tool'); const clearMeasurements = document.querySelector('#clear-measurements');
 const measureStatus = document.querySelector('#measure-status'); const measurementLayer = document.querySelector('#measurement-layer');
+const connectionWarningLayer=document.querySelector('#connection-warning-layer');
+const connectionWarningArrows=new Map();
 
 const canvas = document.querySelector('#scene');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, alpha:true }); renderer.setPixelRatio(Math.min(devicePixelRatio,2)); renderer.shadowMap.enabled=true;
@@ -93,12 +96,12 @@ function placeMeshOnGrid(mesh,desiredPosition,allowInvalidPreview=false){
   mesh.position.copy(snappedPosition);
   const valid=!hasPanelCollision(mesh);
   mesh.userData.placementValid=valid;
-  if(allowInvalidPreview&&mesh.material?.color)mesh.material.color.setHex(valid?PANEL_COLOR:COLLISION_COLOR);
   if(!valid&&!allowInvalidPreview){
     mesh.position.copy(previousPosition);
     mesh.rotation.z=previousRotation;
     mesh.userData.placementValid=true;
   }
+  if(mesh.material?.color)mesh.material.color.setHex((valid||!allowInvalidPreview)&&isConnectorPlacementValid(mesh)?PANEL_COLOR:COLLISION_COLOR);
   return valid;
 }
 const thumbnailCanvas=document.createElement('canvas'); const thumbnailRenderer=new THREE.WebGLRenderer({canvas:thumbnailCanvas,alpha:true,antialias:true,preserveDrawingBuffer:true}); thumbnailRenderer.setSize(96,96,false); thumbnailRenderer.setPixelRatio(1);
@@ -147,7 +150,7 @@ function createMeasurement(start,end,preview=false){
   return measurement;
 }
 function removeMeasurementVisual(measurement){ measurementGroup.remove(measurement.group); measurement.line.geometry.dispose(); measurement.line.material.dispose(); measurement.handleMaterial.dispose(); measurement.label.remove(); if(hoveredMeasurement===measurement)hoveredMeasurement=null; }
-function updateMeasurementControls(){ const hasMeasurements=measurements.length>0; undoMeasurement.disabled=!hasMeasurements; clearMeasurements.disabled=!hasMeasurements; measureStatus.classList.toggle('active',state.measureMode); measureStatus.textContent=!state.measureMode?'Measure':creatingMeasurement?'Release to place · Esc to cancel':'Drag between two points · 20 mm snap'; }
+function updateMeasurementControls(){ const hasMeasurements=measurements.length>0; clearMeasurements.disabled=!hasMeasurements; measureStatus.classList.toggle('active',state.measureMode); measureStatus.textContent=!state.measureMode?'Measure':creatingMeasurement?'Release to place · Esc to cancel':'Drag between two points · 20 mm snap'; }
 function cancelMeasurementDraft(){ if(measurementDraft)removeMeasurementVisual(measurementDraft); measurementDraft=null; measurementStart=null; creatingMeasurement=false; hideMeasurementGuides(); updateMeasurementControls(); }
 function setMeasureMode(enabled){ state.measureMode=enabled; measureTool.classList.toggle('active',enabled); measureTool.setAttribute('aria-pressed',String(enabled)); measurementGrid.visible=enabled; measurementCursor.visible=false; hideMeasurementGuides(); canvas.style.cursor=''; dropZone.classList.toggle('measuring',enabled); if(enabled)select(null); else cancelMeasurementDraft(); updateMeasurementControls(); }
 function worldToCanvas(point){ const projected=point.clone().project(camera); return new THREE.Vector2((projected.x+1)*.5*canvas.clientWidth,(1-projected.y)*.5*canvas.clientHeight); }
@@ -156,17 +159,28 @@ function findMeasurementHit(event,handlesOnly=false){ const rect=canvas.getBound
 function setHoveredMeasurement(measurement){ if(hoveredMeasurement===measurement)return; if(hoveredMeasurement){hoveredMeasurement.line.material.color.setHex(0xd7ff4e);hoveredMeasurement.handleMaterial.color.setHex(0xd7ff4e);hoveredMeasurement.label.classList.remove('hovered');} hoveredMeasurement=measurement; if(measurement){measurement.line.material.color.setHex(0xffffff);measurement.handleMaterial.color.setHex(0xffffff);measurement.label.classList.add('hovered');} }
 function beginMeasurementCreation(event){ const point=snapMeasurementPoint(screenToBoard(event)); measurementStart=point.clone(); measurementDraft=createMeasurement(point,point,true); creatingMeasurement=true; measurementCursor.position.copy(point); measurementCursor.visible=true; showMeasurementGuides(point); canvas.setPointerCapture(event.pointerId); updateMeasurementControls(); }
 function updateMeasurementPointer(event){ const point=snapMeasurementPoint(screenToBoard(event)); if(state.measureMode){measurementCursor.position.copy(point);measurementCursor.visible=true;} if(creatingMeasurement&&measurementDraft){updateMeasurementVisual(measurementDraft,point);showMeasurementGuides(point);} if(measurementHandleDrag){ const measurement=measurementHandleDrag.measurement; if(measurementHandleDrag.handle==='start')measurement.start.copy(point); updateMeasurementVisual(measurement,measurementHandleDrag.handle==='end'?point:measurement.end); showMeasurementGuides(point); } }
-function finishMeasurementCreation(){ if(!creatingMeasurement||!measurementDraft)return; if(measurementDraft.end.distanceTo(measurementStart)<MEASUREMENT_GRID_STEP*.5){cancelMeasurementDraft();return;} measurementDraft.label.classList.remove('preview'); measurements.push(measurementDraft); measurementDraft=null; measurementStart=null; creatingMeasurement=false; hideMeasurementGuides(); updateMeasurementControls(); }
+function finishMeasurementCreation(){ if(!creatingMeasurement||!measurementDraft)return; if(measurementDraft.end.distanceTo(measurementStart)<MEASUREMENT_GRID_STEP*.5){cancelMeasurementDraft();return;} measurementDraft.label.classList.remove('preview'); measurements.push(measurementDraft); measurementDraft=null; measurementStart=null; creatingMeasurement=false; hideMeasurementGuides(); updateMeasurementControls(); recordHistory(); }
 function beginMeasurementHandleDrag(event,hit){ const point=hit.handle==='start'?hit.measurement.start:hit.measurement.end; measurementHandleDrag={measurement:hit.measurement,handle:hit.handle,original:point.clone()}; measurementGrid.visible=true; showMeasurementGuides(point); setHoveredMeasurement(hit.measurement); canvas.setPointerCapture(event.pointerId); canvas.style.cursor='grabbing'; }
-function finishMeasurementHandleDrag(){ if(!measurementHandleDrag)return; const measurement=measurementHandleDrag.measurement; if(measurement.start.distanceTo(measurement.end)<MEASUREMENT_GRID_STEP*.5){ if(measurementHandleDrag.handle==='start')measurement.start.copy(measurementHandleDrag.original); updateMeasurementVisual(measurement,measurementHandleDrag.handle==='end'?measurementHandleDrag.original:measurement.end); } measurementHandleDrag=null; measurementGrid.visible=state.measureMode; hideMeasurementGuides(); canvas.style.cursor=''; }
+function finishMeasurementHandleDrag(){ if(!measurementHandleDrag)return; const measurement=measurementHandleDrag.measurement; if(measurement.start.distanceTo(measurement.end)<MEASUREMENT_GRID_STEP*.5){ if(measurementHandleDrag.handle==='start')measurement.start.copy(measurementHandleDrag.original); updateMeasurementVisual(measurement,measurementHandleDrag.handle==='end'?measurementHandleDrag.original:measurement.end); } measurementHandleDrag=null; measurementGrid.visible=state.measureMode; hideMeasurementGuides(); canvas.style.cursor=''; recordHistory(); }
 function updateMeasurementLabels(){ const width=dropZone.clientWidth; const height=dropZone.clientHeight; [...measurements,...(measurementDraft?[measurementDraft]:[])].forEach(measurement=>{ const projected=measurement.midpoint.clone().project(camera); measurement.label.style.left=`${(projected.x+1)*.5*width}px`; measurement.label.style.top=`${(1-projected.y)*.5*height}px`; measurement.label.hidden=projected.z<-1||projected.z>1; }); }
 measureTool.addEventListener('click',()=>setMeasureMode(!state.measureMode));
-undoMeasurement.addEventListener('click',()=>{ const measurement=measurements.pop(); if(measurement)removeMeasurementVisual(measurement); updateMeasurementControls(); });
-clearMeasurements.addEventListener('click',()=>{ measurements.splice(0).forEach(removeMeasurementVisual); cancelMeasurementDraft(); updateMeasurementControls(); });
-document.addEventListener('keydown',event=>{ if(['INPUT','TEXTAREA'].includes(document.activeElement?.tagName))return; if(event.key.toLowerCase()==='m'){setMeasureMode(!state.measureMode);return;} if(event.key==='Escape'&&state.measureMode){if(measurementDraft)cancelMeasurementDraft();else setMeasureMode(false);} });
+clearMeasurements.addEventListener('click',()=>{ measurements.splice(0).forEach(removeMeasurementVisual); cancelMeasurementDraft(); updateMeasurementControls(); recordHistory(); });
+document.addEventListener('keydown',event=>{
+  const active=document.activeElement;
+  if(['INPUT','TEXTAREA','SELECT'].includes(active?.tagName)||active?.isContentEditable||document.querySelector('dialog[open]'))return;
+  if(draggedMesh||measurementHandleDrag||creatingMeasurement||menuDrag)return;
+  const modifier=event.ctrlKey||event.metaKey;
+  const key=event.key.toLowerCase();
+  if(modifier&&!event.altKey&&key==='z'){event.preventDefault();if(event.shiftKey)redoBoard();else undoBoard();return;}
+  if(modifier&&!event.altKey&&key==='y'){event.preventDefault();redoBoard();return;}
+  if(!modifier&&!event.altKey&&key==='delete'){if(deleteSelection())event.preventDefault();return;}
+  if(modifier||event.altKey)return;
+  if(key==='m'){setMeasureMode(!state.measureMode);return;}
+  if(event.key==='Escape'&&state.measureMode){if(measurementDraft)cancelMeasurementDraft();else setMeasureMode(false);}
+});
 updateMeasurementControls();
 function resize(){ const r=dropZone.getBoundingClientRect(); const height=5.8; const width=height*r.width/r.height; renderer.setSize(r.width,r.height,false); camera.left=-width/2; camera.right=width/2; camera.top=height/2; camera.bottom=-height/2; camera.updateProjectionMatrix(); } new ResizeObserver(resize).observe(dropZone); resize();
-function animate(){ requestAnimationFrame(animate); controls.update(); updateMeasurementLabels(); renderer.render(scene,camera); } animate();
+function animate(){ requestAnimationFrame(animate); controls.update(); updateMeasurementLabels(); updateConnectionWarningArrows(); renderer.render(scene,camera); } animate();
 function prepareGeometry(geometry,part) { geometry.scale(STL_UNIT_SCALE,STL_UNIT_SCALE,STL_UNIT_SCALE); geometry.computeBoundingBox(); const center=new THREE.Vector3(); geometry.boundingBox.getCenter(center); const configuredOrigin=MODEL_ORIGINS_MM[part.file]; if(configuredOrigin){ geometry.translate(-configuredOrigin[0]*STL_UNIT_SCALE,-configuredOrigin[1]*STL_UNIT_SCALE,-center.z); geometry.userData.logicalOrigin=new THREE.Vector2(configuredOrigin[0],configuredOrigin[1]); } else { geometry.translate(-center.x,-center.y,-center.z); } geometry.computeBoundingBox(); return geometry; }
 async function getGeometry(part) { if(state.models.has(part.file)) return state.models.get(part.file); const geometry=await loader.loadAsync(part.url); const model=prepareGeometry(geometry,part); state.models.set(part.file,model); return model; }
 // Quick-build palette: the centre fills a cell, the four wedges add quarters,
@@ -230,7 +244,8 @@ function setQuickGhost(choice,center){
   const token=quickBuildToken;
   getGeometry(choice.part).then(geometry=>{
     if(token!==quickBuildToken||!quickBuildCell)return;
-    const material=new THREE.MeshStandardMaterial({color:0xc7ceca,roughness:.85,transparent:true,opacity:.3,depthTest:false,depthWrite:false});
+    const candidate={userData:{part:choice.part},position:center,rotation:{z:choice.rotation}};
+    const material=new THREE.MeshStandardMaterial({color:isConnectorPlacementValid(candidate)?0xc7ceca:COLLISION_COLOR,roughness:.85,transparent:true,opacity:.3,depthTest:false,depthWrite:false});
     const ghost=new THREE.Mesh(geometry,material);
     ghost.position.set(center.x,center.y,.56);
     ghost.rotation.z=choice.rotation;
@@ -266,6 +281,92 @@ function updateQuickBuild(event){
 }
 const autoConnectors=new THREE.Group(); scene.add(autoConnectors); const autoConnectorMaterial=new THREE.MeshStandardMaterial({color:0xc8ef45,roughness:.42,metalness:.12,transparent:true,opacity:.5,depthWrite:false}); let connectorRevision=0;
 function getWorldConnectionPorts(mesh){ const edges=CONNECTION_PORTS[mesh.userData.part.file]||[]; const cos=Math.cos(mesh.rotation.z); const sin=Math.sin(mesh.rotation.z); const ports=[]; edges.forEach(edge=>{ const normalLength=Math.hypot(edge.normal[0],edge.normal[1]); const localNormalX=edge.normal[0]/normalLength; const localNormalY=edge.normal[1]/normalLength; const normal=new THREE.Vector2(localNormalX*cos-localNormalY*sin,localNormalX*sin+localNormalY*cos); edge.points.forEach(([xMm,yMm],index)=>{ const x=xMm*STL_UNIT_SCALE; const y=yMm*STL_UNIT_SCALE; ports.push({ key:`${mesh.uuid}:${edge.id}:${index}`, mesh, edge:edge.id, index, position:new THREE.Vector3(mesh.position.x+x*cos-y*sin,mesh.position.y+x*sin+y*cos,mesh.position.z), normal }); }); }); return ports; }
+function panelsHaveMatchingConnector(first,second){
+  const reach=2*GRID_VERTEX_RADIUS_MM*STL_UNIT_SCALE+4*STL_UNIT_SCALE;
+  if(Math.abs(first.position.x-second.position.x)>reach||Math.abs(first.position.y-second.position.y)>reach)return false;
+  const firstPorts=getWorldConnectionPorts(first);
+  const secondPorts=getWorldConnectionPorts(second);
+  return firstPorts.some(port=>secondPorts.some(otherPort=>
+    port.normal.dot(otherPort.normal)<-.98&&port.position.distanceTo(otherPort.position)<=4*STL_UNIT_SCALE
+  ));
+}
+function isConnectorPlacementValid(mesh){
+  if(!state.avoidImpossibleConnections||!PANEL_POLYGONS_MM[mesh.userData.part.file])return true;
+  const panels=placed.children.filter(other=>other!==mesh&&PANEL_POLYGONS_MM[other.userData.part.file]);
+  if(!panels.length)return true;
+  return panels.some(other=>panelsHaveMatchingConnector(mesh,other));
+}
+function disconnectedCornerPoint(corner,other){
+  const polygon=transformPanelPolygon(corner);
+  const neighbor=transformPanelPolygon(other);
+  const origin=new THREE.Vector2(corner.position.x,corner.position.y);
+  let closest=null;
+  let closestDistance=Infinity;
+  for(let i=0;i<polygon.length;i++){
+    const start=polygon[i];
+    const end=polygon[(i+1)%polygon.length];
+    const edge=end.clone().sub(start);
+    const length=edge.length();
+    if(length<.001)continue;
+    const direction=edge.divideScalar(length);
+    for(let j=0;j<neighbor.length;j++){
+      const first=neighbor[j];
+      const last=neighbor[(j+1)%neighbor.length];
+      if(Math.abs(direction.cross(last.clone().sub(first).normalize()))>.01)continue;
+      if(Math.abs(first.clone().sub(start).cross(direction))>.045||Math.abs(last.clone().sub(start).cross(direction))>.045)continue;
+      const firstAlong=first.clone().sub(start).dot(direction);
+      const lastAlong=last.clone().sub(start).dot(direction);
+      const overlapStart=Math.max(0,Math.min(firstAlong,lastAlong));
+      const overlapEnd=Math.min(length,Math.max(firstAlong,lastAlong));
+      if(overlapEnd-overlapStart<=.08)continue;
+      const amount=THREE.MathUtils.clamp(origin.clone().sub(start).dot(direction),overlapStart,overlapEnd);
+      const point=start.clone().addScaledVector(direction,amount);
+      const distance=point.distanceToSquared(origin);
+      if(distance<closestDistance){closest=point;closestDistance=distance;}
+    }
+  }
+  return closest;
+}
+function updateConnectionWarningArrows(){
+  for(const {element,point} of connectionWarningArrows.values()){
+    const projected=new THREE.Vector3(point.x,point.y,.8).project(camera);
+    element.hidden=projected.z<-1||projected.z>1||Math.abs(projected.x)>1.05||Math.abs(projected.y)>1.05;
+    if(element.hidden)continue;
+    element.style.left=`${(projected.x+1)*.5*canvas.clientWidth}px`;
+    element.style.top=`${(1-projected.y)*.5*canvas.clientHeight}px`;
+  }
+}
+function refreshConnectionWarnings(){
+  for(const mesh of placed.children){
+    if(PANEL_POLYGONS_MM[mesh.userData.part.file])mesh.material.color.setHex(isConnectorPlacementValid(mesh)?PANEL_COLOR:COLLISION_COLOR);
+  }
+  const active=new Set();
+  if(state.avoidImpossibleConnections){
+    const panels=placed.children.filter(mesh=>PANEL_POLYGONS_MM[mesh.userData.part.file]);
+    for(const corner of panels.filter(mesh=>mesh.userData.part.file.startsWith('90 '))){
+      for(const other of panels){
+        if(corner===other||panelsHaveMatchingConnector(corner,other))continue;
+        const point=disconnectedCornerPoint(corner,other);
+        if(!point)continue;
+        const key=`${corner.uuid}:${other.uuid}`;
+        active.add(key);
+        let arrow=connectionWarningArrows.get(key);
+        if(!arrow){
+          const element=document.createElement('span');
+          element.className='connection-warning-arrow';
+          element.innerHTML='<span>No connection</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3 20 20m-8 0h8v-8"/></svg>';
+          connectionWarningLayer.append(element);
+          arrow={element,point};
+          connectionWarningArrows.set(key,arrow);
+        }
+        arrow.point=point;
+      }
+    }
+  }
+  for(const [key,arrow] of connectionWarningArrows){
+    if(!active.has(key)){arrow.element.remove();connectionWarningArrows.delete(key);}
+  }
+}
 async function recomputeAutoConnectors(){
   const revision=++connectorRevision;
   autoConnectors.clear();
@@ -355,16 +456,20 @@ async function recomputeAutoRings(){
   placed.children.forEach(mesh=>{
     const polygon=transformPanelPolygon(mesh);
     if(!polygon)return;
-    polygon.forEach(vertex=>{
-      const mask=getVertexSectorMask(vertex,polygon);
+    polygon.forEach((vertex,index)=>{
       let node=nodes.find(candidate=>candidate.position.distanceTo(vertex)<=tolerance);
-      if(!node){node={position:vertex.clone(),positions:[],panels:new Set(),mask:0};nodes.push(node);}
+      if(!node){node={position:vertex.clone(),positions:[],panels:new Set(),mask:0,blocked:false};nodes.push(node);}
+      const localVertex=PANEL_POLYGONS_MM[mesh.userData.part.file][index];
+      // The right-angle vertex of a 90° panel has no physical ring mount.
+      if(mesh.userData.part.file.startsWith('90 ')&&Math.abs(localVertex[0])<.001&&Math.abs(localVertex[1])<.001){node.blocked=true;return;}
+      const mask=getVertexSectorMask(vertex,polygon);
       node.positions.push(vertex.clone());
       node.panels.add(mesh.uuid);
       node.mask|=mask;
     });
   });
   for(const node of nodes){
+    if(node.blocked)continue;
     if(state.skipUnnecessaryHardware&&node.panels.size<=1)continue;
     const sectorCount=countBits(node.mask);
     if(!sectorCount)continue;
@@ -385,7 +490,65 @@ async function recomputeAutoRings(){
   }
   updateBillOfMaterials();
 }
-function recomputeAutoHardware(){ updateBillOfMaterials(); recomputeAutoConnectors(); recomputeAutoRings(); }
+const PANEL_MERGE_TARGETS=[
+  {file:'main square.stl',rotation:0,mask:15},
+  {file:'180 horizontal.stl',rotation:0,mask:3},
+  {file:'180 vertical.stl',rotation:Math.PI,mask:6},
+  {file:'180 horizontal.stl',rotation:Math.PI,mask:12},
+  {file:'180 vertical.stl',rotation:0,mask:9}
+];
+function panelQuarterMask(mesh){
+  const polygon=transformPanelPolygon(mesh);
+  if(!polygon)return 0;
+  const offset=GRID_VERTEX_RADIUS_MM*STL_UNIT_SCALE*.25;
+  const samples=[[1,1],[-1,1],[-1,-1],[1,-1]];
+  return samples.reduce((mask,[x,y],index)=>{
+    const point=new THREE.Vector2(mesh.position.x+x*offset,mesh.position.y+y*offset);
+    return mask|(pointInsidePolygon(point,polygon)?1<<index:0);
+  },0);
+}
+function findPanelMerge(){
+  if(!state.avoidImpossibleConnections)return null;
+  const cells=new Map();
+  for(const mesh of placed.children){
+    if(!PANEL_POLYGONS_MM[mesh.userData.part.file])continue;
+    const key=`${mesh.position.x.toFixed(4)}:${mesh.position.y.toFixed(4)}`;
+    if(!cells.has(key))cells.set(key,[]);
+    cells.get(key).push({mesh,mask:panelQuarterMask(mesh)});
+  }
+  for(const items of cells.values()){
+    for(const target of PANEL_MERGE_TARGETS){
+      const touching=items.filter(item=>item.mask&target.mask);
+      if(touching.length<2||touching.some(item=>item.mesh.userData.part.file.includes('rounded')||(item.mask&~target.mask)))continue;
+      const occupied=touching.reduce((mask,item)=>mask|item.mask,0);
+      const area=touching.reduce((total,item)=>total+countBits(item.mask),0);
+      if(occupied===target.mask&&area===countBits(target.mask))return {target,sources:touching.map(item=>item.mesh)};
+    }
+  }
+  return null;
+}
+async function mergeCompatiblePanels(){
+  let candidate;
+  while((candidate=findPanelMerge())){
+    const part=parts.find(item=>item.file===candidate.target.file);
+    if(!part)return;
+    let geometry;
+    try{geometry=await getGeometry(part);}catch{return;}
+    const current=findPanelMerge();
+    if(!current||current.target!==candidate.target||current.sources.length!==candidate.sources.length||!current.sources.every(mesh=>candidate.sources.includes(mesh)))continue;
+    const selected=current.sources.some(mesh=>state.selection.has(mesh));
+    const position=current.sources[0].position.clone();
+    for(const mesh of current.sources){state.selection.delete(mesh);placed.remove(mesh);mesh.material.dispose();}
+    const replacement=new THREE.Mesh(geometry,new THREE.MeshStandardMaterial({color:PANEL_COLOR,roughness:.5,metalness:.08}));
+    replacement.userData.part=part;
+    replacement.position.copy(position);
+    replacement.rotation.z=current.target.rotation;
+    replacement.castShadow=true;
+    placed.add(replacement);
+    if(selected)select(replacement,true);
+  }
+}
+function recomputeAutoHardware(){ refreshConnectionWarnings(); updateBillOfMaterials(); recomputeAutoConnectors(); recomputeAutoRings(); }
 function renderThumbnail(part, geometry) {
   geometry.computeBoundingBox();
   const size = new THREE.Vector3();
@@ -413,14 +576,23 @@ function renderThumbnail(part, geometry) {
   });
   thumbnailScene.remove(mesh);
   mesh.material.dispose();
+  updateBillOfMaterials();
 }
-async function addPart(part, location) { try { const geometry=await getGeometry(part); const material=new THREE.MeshStandardMaterial({color:PANEL_COLOR,roughness:.5,metalness:.08}); const mesh=new THREE.Mesh(geometry,material); mesh.userData.part=part; mesh.rotation.z=part.initialRotation||0; const initialPosition=location||new THREE.Vector3(controls.target.x,controls.target.y,.55); if(!placeMeshOnGrid(mesh,initialPosition)){material.dispose();return;} mesh.castShadow=true; placed.add(mesh); select(mesh); updateCount(); recomputeAutoHardware(); } catch { console.warn(`Could not load ${part.file}`); } }
+async function addPart(part, location) { try { const geometry=await getGeometry(part); const material=new THREE.MeshStandardMaterial({color:PANEL_COLOR,roughness:.5,metalness:.08}); const mesh=new THREE.Mesh(geometry,material); mesh.userData.part=part; mesh.rotation.z=part.initialRotation||0; const initialPosition=location||new THREE.Vector3(controls.target.x,controls.target.y,.55); if(!placeMeshOnGrid(mesh,initialPosition)){material.dispose();return;} mesh.castShadow=true; placed.add(mesh); select(mesh); await mergeCompatiblePanels(); updateCount(); recomputeAutoHardware(); recordHistory(); } catch { console.warn(`Could not load ${part.file}`); } }
 parts.forEach(part => getGeometry(part).then(geometry => renderThumbnail(part, geometry)).catch(() => console.warn(`Could not load preview for ${part.file}`)));
 function addBomPart(counts,part){ if(!part)return; counts.set(part.file,(counts.get(part.file)||0)+1); }
 function renderBomList(container,counts,emptyMessage){
   const rows=parts.filter(part=>counts.has(part.file)).map(part=>{
     const row=document.createElement('div');
     row.className='bom-item';
+    const preview=document.createElement('span');
+    preview.className='bom-item-preview';
+    if(part.previewUrl){
+      const image=new Image();
+      image.src=part.previewUrl;
+      image.alt='';
+      preview.append(image);
+    }
     const name=document.createElement('span');
     name.className='bom-item-name';
     name.textContent=part.name;
@@ -428,7 +600,7 @@ function renderBomList(container,counts,emptyMessage){
     const quantity=document.createElement('strong');
     quantity.className='bom-item-quantity';
     quantity.textContent=counts.get(part.file);
-    row.append(name,quantity);
+    row.append(preview,name,quantity);
     return row;
   });
   if(rows.length){container.replaceChildren(...rows);return;}
@@ -456,19 +628,139 @@ function updateBillOfMaterials(){
   bomTotalCount.textContent=panelTotal+connectionTotal;
 }
 function updateCount(){ const n=placed.children.length; count.textContent=`${n} ${n===1?'part':'parts'} on board`; updateBillOfMaterials(); }
-skipUnnecessaryHardware.addEventListener('change',event=>{ state.skipUnnecessaryHardware=event.target.checked; recomputeAutoHardware(); });
-function select(mesh){ if(state.selected) state.selected.material.emissive.setHex(0); state.selected=mesh||null; if(mesh)mesh.material.emissive.setHex(0x5b250d); }
+const boardHistory=[];
+let historyIndex=-1;
+const undoBoardButton=document.querySelector('#undo-board');
+const redoBoardButton=document.querySelector('#redo-board');
+function updateHistoryButtons(){undoBoardButton.disabled=historyIndex<=0;redoBoardButton.disabled=historyIndex>=boardHistory.length-1;}
+function captureBoard(){
+  return JSON.stringify({
+    parts:placed.children.map(mesh=>({file:mesh.userData.part.file,position:mesh.position.toArray(),rotation:mesh.rotation.z})),
+    measurements:measurements.map(measurement=>({start:measurement.start.toArray(),end:measurement.end.toArray()})),
+    skipUnnecessaryHardware:state.skipUnnecessaryHardware,
+    avoidImpossibleConnections:state.avoidImpossibleConnections
+  });
+}
+function recordHistory(){
+  const snapshot=captureBoard();
+  if(boardHistory[historyIndex]===snapshot)return;
+  boardHistory.splice(historyIndex+1);
+  boardHistory.push(snapshot);
+  if(boardHistory.length>100)boardHistory.shift();
+  historyIndex=boardHistory.length-1;
+  updateHistoryButtons();
+}
+function restoreBoard(snapshot){
+  const board=JSON.parse(snapshot);
+  hideQuickBuild();
+  select(null);
+  for(const mesh of [...placed.children]){placed.remove(mesh);mesh.material.dispose();}
+  for(const item of board.parts){
+    const part=parts.find(candidate=>candidate.file===item.file);
+    const geometry=state.models.get(item.file);
+    if(!part||!geometry)continue;
+    const mesh=new THREE.Mesh(geometry,new THREE.MeshStandardMaterial({color:PANEL_COLOR,roughness:.5,metalness:.08}));
+    mesh.userData.part=part;
+    mesh.position.fromArray(item.position);
+    mesh.rotation.z=item.rotation;
+    mesh.castShadow=true;
+    placed.add(mesh);
+  }
+  measurements.splice(0).forEach(removeMeasurementVisual);
+  cancelMeasurementDraft();
+  for(const item of board.measurements)measurements.push(createMeasurement(new THREE.Vector3().fromArray(item.start),new THREE.Vector3().fromArray(item.end)));
+  state.skipUnnecessaryHardware=board.skipUnnecessaryHardware;
+  skipUnnecessaryHardware.checked=board.skipUnnecessaryHardware;
+  state.avoidImpossibleConnections=board.avoidImpossibleConnections;
+  avoidImpossibleConnections.checked=board.avoidImpossibleConnections;
+  updateMeasurementControls();
+  updateCount();
+  recomputeAutoHardware();
+}
+function undoBoard(){if(historyIndex<=0)return;restoreBoard(boardHistory[--historyIndex]);updateHistoryButtons();}
+function redoBoard(){if(historyIndex>=boardHistory.length-1)return;restoreBoard(boardHistory[++historyIndex]);updateHistoryButtons();}
+undoBoardButton.addEventListener('click',undoBoard);
+redoBoardButton.addEventListener('click',redoBoard);
+skipUnnecessaryHardware.addEventListener('change',event=>{ state.skipUnnecessaryHardware=event.target.checked; recomputeAutoHardware(); recordHistory(); });
+avoidImpossibleConnections.addEventListener('change',async event=>{ state.avoidImpossibleConnections=event.target.checked; hideQuickBuild(); await mergeCompatiblePanels(); updateCount(); recomputeAutoHardware(); recordHistory(); });
+function select(mesh,additive=false){
+  if(!additive){for(const selected of state.selection)selected.material.emissive.setHex(0);state.selection.clear();}
+  if(!mesh)return;
+  if(additive&&state.selection.has(mesh)){mesh.material.emissive.setHex(0);state.selection.delete(mesh);return;}
+  state.selection.add(mesh);
+  mesh.material.emissive.setHex(0x883d22);
+}
+function deleteSelection(){
+  if(!state.selection.size)return false;
+  for(const mesh of state.selection){placed.remove(mesh);mesh.material.dispose();}
+  state.selection.clear();
+  updateCount();
+  recomputeAutoHardware();
+  recordHistory();
+  return true;
+}
+recordHistory();
+const PROJECT_FORMAT='superskadis-project';
+const PROJECT_VERSION=1;
+const projectFileInput=document.querySelector('#project-file');
+const openProjectButton=document.querySelector('#open-project');
+function isFiniteVector(value,length){return Array.isArray(value)&&value.length===length&&value.every(number=>typeof number==='number'&&Number.isFinite(number)&&Math.abs(number)<10000);}
+function readProjectDocument(documentData){
+  if(!documentData||documentData.format!==PROJECT_FORMAT||documentData.version!==PROJECT_VERSION)throw new Error('Unsupported project format or version.');
+  const board=documentData.board;
+  if(!board||!Array.isArray(board.parts)||!Array.isArray(board.measurements)||board.parts.length>5000||board.measurements.length>5000||typeof board.skipUnnecessaryHardware!=='boolean'||typeof board.avoidImpossibleConnections!=='boolean')throw new Error('The project data is incomplete or invalid.');
+  const normalized={parts:[],measurements:[],skipUnnecessaryHardware:board.skipUnnecessaryHardware,avoidImpossibleConnections:board.avoidImpossibleConnections};
+  for(const item of board.parts){
+    if(!item||typeof item.file!=='string'||!parts.some(part=>part.file===item.file)||!isFiniteVector(item.position,3)||typeof item.rotation!=='number'||!Number.isFinite(item.rotation))throw new Error('The project contains an unknown or invalid part.');
+    normalized.parts.push({file:item.file,position:item.position,rotation:item.rotation});
+  }
+  for(const item of board.measurements){
+    if(!item||!isFiniteVector(item.start,3)||!isFiniteVector(item.end,3))throw new Error('The project contains an invalid measurement.');
+    normalized.measurements.push({start:item.start,end:item.end});
+  }
+  const view=documentData.camera;
+  if(view&&(!isFiniteVector(view.position,3)||!isFiniteVector(view.target,3)||typeof view.zoom!=='number'||!Number.isFinite(view.zoom)||view.zoom<controls.minZoom||view.zoom>controls.maxZoom||view.position[2]<=0))throw new Error('The project contains an invalid camera view.');
+  return {board:normalized,camera:view||null};
+}
+document.querySelector('#save-project').addEventListener('click',()=>{
+  const project={format:PROJECT_FORMAT,version:PROJECT_VERSION,savedAt:new Date().toISOString(),board:JSON.parse(captureBoard()),camera:{position:camera.position.toArray(),target:controls.target.toArray(),zoom:camera.zoom}};
+  const stamp=project.savedAt.slice(0,16).replace('T','-').replace(':','-');
+  triggerDownload(new Blob([JSON.stringify(project,null,2)],{type:'application/json'}),`superskadis-project-${stamp}.json`);
+});
+openProjectButton.addEventListener('click',()=>projectFileInput.click());
+projectFileInput.addEventListener('change',async()=>{
+  const file=projectFileInput.files?.[0];
+  if(!file)return;
+  openProjectButton.disabled=true;
+  try{
+    if(file.size>5_000_000)throw new Error('Project file is too large.');
+    const project=readProjectDocument(JSON.parse(await file.text()));
+    const requiredParts=[...new Set(project.board.parts.map(item=>item.file))];
+    await Promise.all(requiredParts.map(file=>getGeometry(parts.find(part=>part.file===file))));
+    if((placed.children.length||measurements.length)&&!window.confirm('Open this project and replace the current board?'))return;
+    restoreBoard(JSON.stringify(project.board));
+    if(project.camera){
+      camera.position.fromArray(project.camera.position);
+      controls.target.fromArray(project.camera.target);
+      camera.zoom=project.camera.zoom;
+      camera.updateProjectionMatrix();
+      controls.update();
+    }
+    recordHistory();
+  }catch(error){window.alert(`Could not open project: ${error.message||'Invalid JSON file.'}`);}
+  finally{projectFileInput.value='';openProjectButton.disabled=false;}
+});
 function screenToBoard(event){ const rect=canvas.getBoundingClientRect(); pointer.x=((event.clientX-rect.left)/rect.width)*2-1; pointer.y=-((event.clientY-rect.top)/rect.height)*2+1; raycaster.setFromCamera(pointer,camera); const target=new THREE.Plane(new THREE.Vector3(0,0,1),0); const result=new THREE.Vector3(); raycaster.ray.intersectPlane(target,result); result.z=.55; return result; }
 canvas.addEventListener('wheel',event=>{ event.preventDefault(); const pointBeforeZoom=screenToBoard(event); const deltaMultiplier=event.deltaMode===1?16:event.deltaMode===2?100:1; const zoomFactor=Math.exp(-event.deltaY*deltaMultiplier*.0015*controls.zoomSpeed); const nextZoom=THREE.MathUtils.clamp(camera.zoom*zoomFactor,controls.minZoom,controls.maxZoom); if(nextZoom===camera.zoom)return; camera.zoom=nextZoom; camera.updateProjectionMatrix(); const pointAfterZoom=screenToBoard(event); const correction=pointBeforeZoom.sub(pointAfterZoom); camera.position.x+=correction.x; camera.position.y+=correction.y; controls.target.x+=correction.x; controls.target.y+=correction.y; controls.update(); },{passive:false});
 document.addEventListener('skadis:add-part', event => addPart(event.detail));
 let menuDrag=null; let menuDragToken=0;
-function finishMenuDrop(){ if(!menuDrag?.mesh)return; const mesh=menuDrag.mesh; if(mesh.userData.placementValid===false){scene.remove(mesh);mesh.material.dispose();menuDrag=null;return;} scene.remove(mesh); placed.add(mesh); mesh.visible=true; if(mesh.material?.color)mesh.material.color.setHex(PANEL_COLOR); select(mesh); updateCount(); menuDrag=null; recomputeAutoHardware(); }
+async function finishMenuDrop(){ if(!menuDrag?.mesh)return; const mesh=menuDrag.mesh; if(mesh.userData.placementValid===false){scene.remove(mesh);mesh.material.dispose();menuDrag=null;return;} scene.remove(mesh); placed.add(mesh); mesh.visible=true; select(mesh); menuDrag=null; await mergeCompatiblePanels(); updateCount(); recomputeAutoHardware(); recordHistory(); }
 document.addEventListener('skadis:menu-drag-start',async event=>{ hideQuickBuild(); const token=++menuDragToken; if(menuDrag?.mesh){scene.remove(menuDrag.mesh);menuDrag.mesh.material.dispose();} menuDrag={token,part:event.detail.part,mesh:null,valid:false,desiredPosition:null,over:false,dropped:false}; try{ const geometry=await getGeometry(event.detail.part); if(!menuDrag||menuDrag.token!==token)return; const material=new THREE.MeshStandardMaterial({color:PANEL_COLOR,roughness:.5,metalness:.08}); const mesh=new THREE.Mesh(geometry,material); mesh.userData.part=event.detail.part; mesh.rotation.z=event.detail.part.initialRotation||0; mesh.castShadow=true; mesh.visible=menuDrag.over; if(menuDrag.desiredPosition)menuDrag.valid=placeMeshOnGrid(mesh,menuDrag.desiredPosition,true); menuDrag.mesh=mesh; scene.add(mesh); if(menuDrag.dropped)finishMenuDrop(); }catch{ if(menuDrag?.token===token)menuDrag=null; } });
 document.addEventListener('skadis:menu-drag-move',event=>{ if(!menuDrag)return; menuDrag.over=true; menuDrag.desiredPosition=screenToBoard(event.detail); if(menuDrag.mesh){menuDrag.mesh.visible=true;menuDrag.valid=placeMeshOnGrid(menuDrag.mesh,menuDrag.desiredPosition,true);} });
 document.addEventListener('skadis:menu-drag-leave',()=>{ if(menuDrag){menuDrag.over=false;if(menuDrag.mesh)menuDrag.mesh.visible=false;} });
 document.addEventListener('skadis:menu-drag-drop',event=>{ const desiredPosition=screenToBoard(event.detail); if(!menuDrag){addPart(event.detail.part,desiredPosition);return;} menuDrag.over=true;menuDrag.dropped=true;menuDrag.desiredPosition=desiredPosition;if(menuDrag.mesh){menuDrag.valid=placeMeshOnGrid(menuDrag.mesh,desiredPosition,true);finishMenuDrop();} });
 document.addEventListener('skadis:menu-drag-end',()=>{ if(!menuDrag||menuDrag.dropped)return;if(menuDrag.mesh){scene.remove(menuDrag.mesh);menuDrag.mesh.material.dispose();}menuDrag=null; });
-let draggedMesh=null; let cameraPan=null;
+let draggedMesh=null; let dragStart=null; let cameraPan=null;
 canvas.addEventListener('pointerdown',e=>{
   if(e.button!==0)return;
   const handleHit=findMeasurementHit(e,true);
@@ -479,20 +771,23 @@ canvas.addEventListener('pointerdown',e=>{
   pointer.y=-((e.clientY-rect.top)/rect.height)*2+1;
   raycaster.setFromCamera(pointer,camera);
   const hit=raycaster.intersectObjects(placed.children)[0];
-  select(hit?.object);
+  const multiSelect=e.shiftKey||e.ctrlKey;
+  select(hit?.object,multiSelect);
+  if(multiSelect){hideQuickBuild();return;}
   canvas.setPointerCapture(e.pointerId);
-  if(hit){hideQuickBuild();draggedMesh=hit.object;return;}
+  if(hit){hideQuickBuild();draggedMesh=hit.object;dragStart={position:draggedMesh.position.clone(),rotation:draggedMesh.rotation.z};return;}
   const choice=updateQuickBuild(e);
   quickPress=choice?{id:choice.id,file:choice.part.file,rotation:choice.rotation,center:quickBuildCell.center.clone()}:null;
   hideQuickBuild();
   cameraPan={x:e.clientX,y:e.clientY,startX:e.clientX,startY:e.clientY,moved:false};
 });
 canvas.addEventListener('pointermove',e=>{
+  if((e.shiftKey||e.ctrlKey)&&!draggedMesh&&!cameraPan&&!measurementHandleDrag&&!creatingMeasurement){hideQuickBuild();return;}
   if(measurementHandleDrag||creatingMeasurement){updateMeasurementPointer(e);return;}
   const measurementHit=findMeasurementHit(e);
   setHoveredMeasurement(measurementHit?.measurement||null);
   if(state.measureMode){hideQuickBuild();updateMeasurementPointer(e);return;}
-  if(draggedMesh){hideQuickBuild();placeMeshOnGrid(draggedMesh,screenToBoard(e));return;}
+  if(draggedMesh){hideQuickBuild();placeMeshOnGrid(draggedMesh,screenToBoard(e));refreshConnectionWarnings();return;}
   if(cameraPan){
     if(Math.hypot(e.clientX-cameraPan.startX,e.clientY-cameraPan.startY)>5)cameraPan.moved=true;
     if(!cameraPan.moved)return;
@@ -511,7 +806,7 @@ canvas.addEventListener('pointermove',e=>{
   updateQuickBuild(e);
 });
 canvas.addEventListener('pointerleave',()=>{ if(!measurementHandleDrag&&!creatingMeasurement){measurementCursor.visible=false;setHoveredMeasurement(null);if(!cameraPan)hideQuickBuild();canvas.style.cursor='';} });
-function stopMoving(e){ if(!draggedMesh&&!cameraPan)return; const modelMoved=Boolean(draggedMesh); draggedMesh=null; cameraPan=null; if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId); if(modelMoved)recomputeAutoHardware(); }
+async function stopMoving(e){ if(!draggedMesh&&!cameraPan)return; const modelMoved=Boolean(draggedMesh); const changed=modelMoved&&dragStart&&(!draggedMesh.position.equals(dragStart.position)||draggedMesh.rotation.z!==dragStart.rotation); draggedMesh=null;dragStart=null;cameraPan=null; if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId); if(changed)await mergeCompatiblePanels(); if(modelMoved)recomputeAutoHardware(); if(changed){updateCount();recordHistory();} }
 function finishPointerInteraction(event){
   if(measurementHandleDrag){updateMeasurementPointer(event);finishMeasurementHandleDrag();if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId);return;}
   if(creatingMeasurement){updateMeasurementPointer(event);finishMeasurementCreation();if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId);return;}
@@ -528,8 +823,8 @@ function finishPointerInteraction(event){
 }
 function cancelPointerInteraction(event){ quickPress=null; hideQuickBuild(); if(measurementHandleDrag){ const measurement=measurementHandleDrag.measurement; if(measurementHandleDrag.handle==='start')measurement.start.copy(measurementHandleDrag.original); updateMeasurementVisual(measurement,measurementHandleDrag.handle==='end'?measurementHandleDrag.original:measurement.end); measurementHandleDrag=null; measurementGrid.visible=state.measureMode; hideMeasurementGuides(); canvas.style.cursor=''; } else if(creatingMeasurement)cancelMeasurementDraft(); else stopMoving(event); if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId); }
 canvas.addEventListener('pointerup',finishPointerInteraction); canvas.addEventListener('pointercancel',cancelPointerInteraction);
-canvas.addEventListener('contextmenu',event=>{ event.preventDefault(); const measurementHit=findMeasurementHit(event); if(measurementHit){ const index=measurements.indexOf(measurementHit.measurement); if(index>=0)measurements.splice(index,1); removeMeasurementVisual(measurementHit.measurement); canvas.style.cursor=''; updateMeasurementControls(); return; } if(state.measureMode){cancelMeasurementDraft();return;} const rect=canvas.getBoundingClientRect(); pointer.x=((event.clientX-rect.left)/rect.width)*2-1; pointer.y=-((event.clientY-rect.top)/rect.height)*2+1; raycaster.setFromCamera(pointer,camera); const hit=raycaster.intersectObjects(placed.children)[0]; if(!hit)return; const mesh=hit.object; if(state.selected===mesh)select(null); placed.remove(mesh); mesh.material.dispose(); updateCount(); recomputeAutoHardware(); });
-document.querySelector('#clear-board').onclick=()=>{hideQuickBuild();placed.clear();autoConnectors.clear();autoRings.clear();connectorRevision++;ringRevision++;measurements.splice(0).forEach(removeMeasurementVisual);cancelMeasurementDraft();select(null);updateCount()};
+canvas.addEventListener('contextmenu',event=>{ event.preventDefault(); const measurementHit=findMeasurementHit(event); if(measurementHit){ const index=measurements.indexOf(measurementHit.measurement); if(index>=0)measurements.splice(index,1); removeMeasurementVisual(measurementHit.measurement); canvas.style.cursor=''; updateMeasurementControls(); recordHistory(); return; } if(state.measureMode){cancelMeasurementDraft();return;} const rect=canvas.getBoundingClientRect(); pointer.x=((event.clientX-rect.left)/rect.width)*2-1; pointer.y=-((event.clientY-rect.top)/rect.height)*2+1; raycaster.setFromCamera(pointer,camera); const hit=raycaster.intersectObjects(placed.children)[0]; if(!hit)return; const mesh=hit.object; state.selection.delete(mesh);placed.remove(mesh); mesh.material.dispose(); updateCount(); recomputeAutoHardware();recordHistory(); });
+document.querySelector('#clear-board').onclick=()=>{hideQuickBuild();select(null);for(const mesh of [...placed.children]){placed.remove(mesh);mesh.material.dispose();}autoConnectors.clear();autoRings.clear();connectorRevision++;ringRevision++;measurements.splice(0).forEach(removeMeasurementVisual);cancelMeasurementDraft();updateCount();recomputeAutoHardware();recordHistory();};
 
 // Build plate generation -----------------------------------------------------
 const plateDialog=document.querySelector('#plate-dialog');
@@ -827,6 +1122,63 @@ function groupRepeatedPlates(plates){
   });
   return [...groups.values()];
 }
+function balanceHalfPanelPlates(plates,options){
+  const vertical='180 vertical.stl';
+  const horizontal='180 horizontal.stl';
+  const halfFiles=new Set([vertical,horizontal]);
+  const indices=[];
+  const items=new Map([[vertical,[]],[horizontal,[]]]);
+  const templates=new Map();
+  const pairKey=(first,second)=>[first,second].sort().join('|');
+  plates.forEach((plate,index)=>{
+    if(plate.kind!=='structural'||plate.placements.length!==2||!plate.placements.every(placement=>halfFiles.has(placement.item.part.file)))return;
+    indices.push(index);
+    const files=plate.placements.map(placement=>placement.item.part.file);
+    templates.set(pairKey(...files),plate);
+    plate.placements.forEach(placement=>items.get(placement.item.part.file).push(placement.item));
+  });
+  const verticalItems=items.get(vertical);
+  const horizontalItems=items.get(horizontal);
+  const mixedCount=Math.min(verticalItems.length,horizontalItems.length);
+  if(indices.length<2||!mixedCount)return plates;
+  const desired=[];
+  for(let index=0;index<mixedCount;index++)desired.push([vertical,horizontal]);
+  for(let index=mixedCount;index<verticalItems.length;index+=2)desired.push([vertical,vertical]);
+  for(let index=mixedCount;index<horizontalItems.length;index+=2)desired.push([horizontal,horizontal]);
+  if(desired.length!==indices.length)return plates;
+  for(const [firstFile,secondFile] of desired){
+    const key=pairKey(firstFile,secondFile);
+    if(templates.has(key))continue;
+    const first=items.get(firstFile)[0];
+    const second=items.get(secondFile)[firstFile===secondFile?1:0];
+    let template=null;
+    for(const order of [[first,second],[second,first]]){
+      const candidate={kind:'structural',placements:[]};
+      const firstPlacement=findPlacement(order[0],candidate,options,2);
+      if(!firstPlacement)continue;
+      candidate.placements.push(firstPlacement);
+      const secondPlacement=findPlacement(order[1],candidate,options,2);
+      if(!secondPlacement)continue;
+      candidate.placements.push(secondPlacement);
+      template=centerPlateContents(candidate);
+      break;
+    }
+    if(!template)return plates;
+    templates.set(key,template);
+  }
+  const queues=new Map([[vertical,[...verticalItems]],[horizontal,[...horizontalItems]]]);
+  const replacements=desired.map(([firstFile,secondFile])=>{
+    const template=templates.get(pairKey(firstFile,secondFile));
+    const placements=template.placements.map(original=>{
+      const item=queues.get(original.item.part.file).shift();
+      return refreshPlacement({item,x:original.x,y:original.y,angle:original.angle,locked:false});
+    });
+    return {kind:'structural',placements,usedArea:placements.reduce((sum,placement)=>sum+placement.item.area,0),solitary:false};
+  });
+  const balanced=[...plates];
+  indices.forEach((index,position)=>{balanced[index]=replacements[position];});
+  return balanced;
+}
 async function generateBuildPlates(deep=false){
   if(plateGeneratorState.running)return;
   plateGeneratorState.running=true;
@@ -850,7 +1202,7 @@ async function generateBuildPlates(deep=false){
       const report=(done,label)=>setPlateProgress(progress+done/totalItems*78/attempts,`${label} · layout ${attempt+1}/${attempts}`);
       const structuralPlates=await packItemGroup(structuralItems,'structural',options,attempt,step,fraction=>report(fraction*structuralItems.length,'Packing panels'));
       const connectionPlates=await packItemGroup(connectionItems,'connections',options,attempt,step,fraction=>report(structuralItems.length+fraction*connectionItems.length,'Packing connections'));
-      const candidate=[...structuralPlates,...connectionPlates];
+      const candidate=[...balanceHalfPanelPlates(structuralPlates,options),...connectionPlates];
       const score=packingScore(candidate);
       if(score<bestScore){best=candidate;bestScore=score;}
       const usableArea=(options.width-2*options.brim)*(options.depth-2*options.brim);
@@ -1040,7 +1392,7 @@ document.querySelector('#repack-plate').addEventListener('click',()=>{
 });
 new ResizeObserver(()=>{if(plateEditorDialog.open)renderPlateEditor();}).observe(plateEditorCanvas);
 
-document.querySelector('#open-build-plates').addEventListener('click',()=>plateDialog.showModal());
+document.querySelector('#open-build-plates').addEventListener('click',()=>{plateDialog.showModal();generateBuildPlates(false);});
 document.querySelector('#close-build-plates').addEventListener('click',()=>plateDialog.close());
 document.querySelector('#close-plate-editor').addEventListener('click',()=>plateEditorDialog.close());
 plateEditorDialog.addEventListener('close',()=>{if(plateGeneratorState.uniquePlates.length)renderPlateResults();});

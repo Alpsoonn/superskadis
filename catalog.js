@@ -8,9 +8,8 @@
   ].map(([name, category, file]) => ({ name, category, file, group: ['Structure', 'Angle'].includes(category) ? 'Structural' : 'Connections', url: `./3D%20parts/${encodeURIComponent(file)}` }));
 
   window.SKADIS_PARTS = parts;
-  const state = { filter: 'All', query: '', corners: 'Sharp' };
+  const state = { query: '', corners: 'Sharp' };
   const list = document.querySelector('#parts-list');
-  const filters = document.querySelector('#filters');
   const search = document.querySelector('#part-search');
   const template = document.querySelector('#part-template');
   const dropZone = document.querySelector('#drop-zone');
@@ -134,40 +133,9 @@
 
   function renderCatalog() {
     window.SKADIS_CORNER_STYLE = state.corners;
-    const categories = ['All', 'Panels', 'Connections'];
-    filters.replaceChildren(...categories.map(category => {
-      const button = document.createElement('button');
-      button.className = `filter ${state.filter === category ? 'active' : ''}`;
-      button.textContent = category;
-      button.setAttribute('aria-pressed', String(state.filter === category));
-      button.onclick = () => { state.filter = category; renderCatalog(); };
-      return button;
-    }));
-    const groups = [];
-    if (state.filter !== 'Connections') {
-      const panels = createPanelPalette();
-      if (panels) groups.push(panels);
-    }
-    if (state.filter !== 'Panels') {
-      const connections = parts.filter(part => part.group === 'Connections' && matches(part));
-      if (connections.length) {
-        const section = createSection('Connections');
-        ['Connector', 'Ring'].forEach(category => {
-          const categoryParts = connections.filter(part => part.category === category);
-          if (!categoryParts.length) return;
-          const heading = document.createElement('h3');
-          heading.className = 'part-subheading';
-          heading.textContent = category === 'Ring' ? 'Rings · 1/8 to 8/8' : 'Connector';
-          const grid = document.createElement('div');
-          grid.className = 'part-grid';
-          grid.replaceChildren(...categoryParts.map(part => createPartItem(part)));
-          section.append(heading, grid);
-        });
-        groups.push(section);
-      }
-    }
-    list.replaceChildren(...groups);
-    if (!groups.length) {
+    const panels = createPanelPalette();
+    list.replaceChildren(...(panels ? [panels] : []));
+    if (!panels) {
       const empty = document.createElement('p');
       empty.className = 'catalog-empty';
       empty.textContent = 'No matching parts.';
@@ -189,7 +157,7 @@
   dropZone.addEventListener('drop', event => {
     event.preventDefault();
     const part = activeDragPart || parts.find(item => item.file === event.dataTransfer.getData('text/plain'));
-    if (!part) return;
+    if (!part || part.group !== 'Structural') return;
     document.dispatchEvent(new CustomEvent('skadis:menu-drag-drop', {
       detail: { part, clientX: event.clientX, clientY: event.clientY }
     }));
